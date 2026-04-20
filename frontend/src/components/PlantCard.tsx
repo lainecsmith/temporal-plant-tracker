@@ -257,7 +257,7 @@ export function PlantCard({ plant, onUpdate }: Props) {
             value={r.temperature}
             min={cr.temperature_min}
             max={cr.temperature_max}
-            unit="°C"
+            unit="°F"
             isOutOfRange={plant.out_of_range_fields.includes("temperature")}
           />
           <MetricBar

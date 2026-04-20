@@ -26,7 +26,7 @@ with workflow.unsafe.imports_passed_through():
         trigger_ha_alert,
         clear_ha_alert_light,
     )
-    from models.plant import CareRanges, PlantState, PlantStatus, SensorReadings
+    from models.plant import CareRanges, CareRangesWithReasoning, PlantState, PlantStatus, SensorReadings
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +63,8 @@ class PlantWorkflowContinuation:
     sensor_device_id: Optional[str] = None
     sensor_device_name: Optional[str] = None
     sensor_entities: Optional[dict] = None  # device_class -> entity_id
+    # Per-metric AI reasoning (populated only when source == "ai")
+    care_ranges_reasoning: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +100,7 @@ class PlantWorkflow:
         # -------------------------------------------------------------------
         self._care_ranges: Optional[CareRanges] = None
         self._care_ranges_source: str = "unknown"
+        self._care_ranges_reasoning: Optional[dict[str, str]] = None
         self._ranges_already_fetched: bool = False
 
         # -------------------------------------------------------------------
@@ -129,6 +132,7 @@ class PlantWorkflow:
             if input.care_ranges is not None:
                 self._care_ranges = input.care_ranges
             self._care_ranges_source = input.care_ranges_source
+            self._care_ranges_reasoning = input.care_ranges_reasoning or None
             self._ranges_already_fetched = input.ranges_already_fetched
             self._sensor_entity_id = input.sensor_entity_id
             self._sensor_device_id = input.sensor_device_id
@@ -217,6 +221,7 @@ class PlantWorkflow:
                 air_humidity_min=0, air_humidity_max=100,
             ),
             care_ranges_source=self._care_ranges_source,
+            care_ranges_reasoning=self._care_ranges_reasoning,
             sensor_entity_id=self._sensor_entity_id,
             sensor_device_id=self._sensor_device_id,
             sensor_device_name=self._sensor_device_name,
@@ -321,7 +326,7 @@ class PlantWorkflow:
             workflow.logger.info(
                 f"[{self._name}] Not found in OpenPlantbook — asking AI"
             )
-            ai_ranges: CareRanges = await workflow.execute_activity(
+            ai_ranges: CareRangesWithReasoning = await workflow.execute_activity(
                 get_care_ranges_from_ai,
                 self._species,
                 start_to_close_timeout=timedelta(seconds=90),
@@ -331,6 +336,13 @@ class PlantWorkflow:
                     maximum_attempts=3,
                 ),
             )
+            # Extract reasoning before temperature conversion (model_copy preserves it)
+            self._care_ranges_reasoning = {
+                "soil_moisture_reasoning": ai_ranges.soil_moisture_reasoning,
+                "temperature_reasoning": ai_ranges.temperature_reasoning,
+                "air_humidity_reasoning": ai_ranges.air_humidity_reasoning,
+                "light_lux_reasoning": ai_ranges.light_lux_reasoning,
+            }
             # AI returns temperatures in Celsius — convert to Fahrenheit
             self._care_ranges = _convert_care_ranges_temp_to_f(ai_ranges)
             self._care_ranges_source = "ai"
@@ -417,6 +429,7 @@ class PlantWorkflow:
             species=self._species,
             care_ranges=self._care_ranges,
             care_ranges_source=self._care_ranges_source,
+            care_ranges_reasoning=self._care_ranges_reasoning,
             sensor_entity_id=self._sensor_entity_id,
             sensor_device_id=self._sensor_device_id,
             sensor_device_name=self._sensor_device_name,

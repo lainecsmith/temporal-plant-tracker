@@ -25,6 +25,8 @@ export interface PlantState {
   species: string;
   care_ranges: CareRanges;
   care_ranges_source: "openplantbook" | "ai" | "manual" | "unknown";
+  /** Per-metric AI reasoning strings — only present when care_ranges_source === "ai" */
+  care_ranges_reasoning: Record<string, string> | null;
   // Legacy single-entity association
   sensor_entity_id: string | null;
   // Device-level association (preferred)
