@@ -17,7 +17,10 @@ export interface SensorReadings {
   timestamp: string;
 }
 
-export type PlantStatus = "ok" | "warning" | "unknown";
+export type PlantStatus = "ok" | "warning" | "unknown" | "dead" | "given_away";
+
+/** Statuses that end the workflow — plant is removed from the active list */
+export const TERMINAL_STATUSES: ReadonlySet<PlantStatus> = new Set(["dead", "given_away"]);
 
 export interface PlantState {
   plant_id: string;

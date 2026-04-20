@@ -24,7 +24,9 @@ from models.plant import (
     HADeviceEntity,
     HASensor,
     PlantState,
+    TERMINAL_STATUSES,
     UpdateCareRangesRequest,
+    UpdatePlantStatusRequest,
 )
 from workflows.plant_workflow import PlantWorkflow, PlantWorkflowInput
 
@@ -246,6 +248,56 @@ async def refresh_plant(plant_id: str):
         import asyncio
         await asyncio.sleep(0.5)
         state: PlantState = await handle.query(PlantWorkflow.get_state)
+        return state
+    except RPCError as e:
+        if e.status == RPCStatusCode.NOT_FOUND:
+            raise HTTPException(status_code=404, detail=f"Plant {plant_id!r} not found")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/plants/{plant_id}/status", response_model=PlantState)
+async def update_plant_status(plant_id: str, body: UpdatePlantStatusRequest):
+    """
+    Change the lifecycle status of a plant.
+
+    Terminal statuses (e.g. 'dead', 'given_away') will signal the workflow to
+    exit cleanly. The last-known state is returned before the workflow completes.
+    Non-terminal statuses update the status in-place without ending the workflow.
+    """
+    handle = await _get_plant_handle(plant_id)
+    is_terminal = body.status in TERMINAL_STATUSES
+    try:
+        await handle.signal(PlantWorkflow.set_plant_status, body.status.value)
+
+        # Give the workflow a moment to process the signal and update its state.
+        # For terminal statuses we wait a bit longer since the workflow exits.
+        await asyncio.sleep(0.5 if is_terminal else 0.3)
+
+        # After a terminal signal the workflow may have already completed, so
+        # querying it will fail. Return a best-effort state using what we know.
+        if is_terminal:
+            from models.plant import CareRanges
+            from datetime import datetime
+            # Attempt a final query; fall back gracefully if the workflow is gone.
+            try:
+                state: PlantState = await handle.query(PlantWorkflow.get_state)
+            except Exception:
+                state = PlantState(
+                    plant_id=plant_id,
+                    name="",
+                    species="",
+                    care_ranges=CareRanges(
+                        soil_moisture_min=0, soil_moisture_max=100,
+                        temperature_min=0, temperature_max=50,
+                        air_humidity_min=0, air_humidity_max=100,
+                    ),
+                    care_ranges_source="unknown",
+                    status=body.status,
+                    created_at=datetime.utcnow(),
+                )
+            return state
+
+        state = await handle.query(PlantWorkflow.get_state)
         return state
     except RPCError as e:
         if e.status == RPCStatusCode.NOT_FOUND:

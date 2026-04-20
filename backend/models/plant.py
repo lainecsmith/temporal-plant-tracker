@@ -67,6 +67,15 @@ class PlantStatus(str, Enum):
     OK = "ok"
     WARNING = "warning"       # one or more metrics out of range
     UNKNOWN = "unknown"       # no sensor associated yet, or no readings
+    DEAD = "dead"             # plant has died — workflow ends
+    GIVEN_AWAY = "given_away" # plant was given away — workflow ends
+
+
+# Statuses that cause the workflow to complete (easy to extend later)
+TERMINAL_STATUSES: frozenset[PlantStatus] = frozenset({
+    PlantStatus.DEAD,
+    PlantStatus.GIVEN_AWAY,
+})
 
 
 # ---------------------------------------------------------------------------
@@ -160,3 +169,8 @@ class AssociateDeviceRequest(BaseModel):
     device_id: str
     device_name: str
     sensor_entities: dict[str, str]  # device_class -> entity_id
+
+
+class UpdatePlantStatusRequest(BaseModel):
+    """Request to change a plant's lifecycle status."""
+    status: PlantStatus

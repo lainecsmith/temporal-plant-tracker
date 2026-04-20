@@ -42,6 +42,10 @@ export default function App() {
     );
   }
 
+  function handlePlantRemove(plantId: string) {
+    setPlants((prev) => prev.filter((p) => p.plant_id !== plantId));
+  }
+
   function handlePlantCreated(plant: PlantState) {
     setPlants((prev) => {
       const exists = prev.some((p) => p.plant_id === plant.plant_id);
@@ -238,6 +242,7 @@ export default function App() {
                 key={plant.plant_id}
                 plant={plant}
                 onUpdate={handlePlantUpdate}
+                onRemove={handlePlantRemove}
               />
             ))}
           </div>

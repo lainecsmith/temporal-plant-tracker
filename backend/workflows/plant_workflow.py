@@ -26,7 +26,7 @@ with workflow.unsafe.imports_passed_through():
         trigger_ha_alert,
         clear_ha_alert_light,
     )
-    from models.plant import CareRanges, CareRangesWithReasoning, PlantState, PlantStatus, SensorReadings
+    from models.plant import CareRanges, CareRangesWithReasoning, PlantState, PlantStatus, SensorReadings, TERMINAL_STATUSES
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +154,9 @@ class PlantWorkflow:
         # Force-wakeup flag used to skip sleep on refresh_readings signal
         self._force_poll: bool = False
 
+        # Set to True when a terminal status is received — causes workflow to exit cleanly
+        self._stop_requested: bool = False
+
     # -----------------------------------------------------------------------
     # Helpers: is a sensor associated?
     # -----------------------------------------------------------------------
@@ -204,6 +207,33 @@ class PlantWorkflow:
         workflow.logger.info(f"[{self._name}] Immediate refresh requested")
         self._force_poll = True
 
+    @workflow.signal
+    def set_plant_status(self, status: str) -> None:
+        """
+        Change the plant's lifecycle status.
+
+        If the new status is a terminal status (e.g. 'dead', 'given_away'),
+        the workflow will exit cleanly after this signal is processed.
+        """
+        try:
+            new_status = PlantStatus(status)
+        except ValueError:
+            workflow.logger.error(
+                f"[{self._name}] Unknown status {status!r} — ignoring"
+            )
+            return
+
+        workflow.logger.info(
+            f"[{self._name}] Status changed to {new_status.value!r}"
+        )
+        self._status = new_status
+
+        if new_status in TERMINAL_STATUSES:
+            workflow.logger.info(
+                f"[{self._name}] Terminal status set — workflow will exit cleanly"
+            )
+            self._stop_requested = True
+
     # -----------------------------------------------------------------------
     # Query
     # -----------------------------------------------------------------------
@@ -253,7 +283,14 @@ class PlantWorkflow:
             workflow.logger.info(
                 f"[{self._name}] Waiting for sensor association..."
             )
-            await workflow.wait_condition(self._has_sensor)
+            await workflow.wait_condition(
+                lambda: self._has_sensor() or self._stop_requested
+            )
+            if self._stop_requested:
+                workflow.logger.info(
+                    f"[{self._name}] Terminal status received while awaiting sensor — exiting"
+                )
+                return
             workflow.logger.info(
                 f"[{self._name}] Sensor associated: device={self._sensor_device_id!r} "
                 f"entity={self._sensor_entity_id!r}"
@@ -267,6 +304,13 @@ class PlantWorkflow:
         )
 
         while True:
+            # Exit cleanly if a terminal status was signalled
+            if self._stop_requested:
+                workflow.logger.info(
+                    f"[{self._name}] Exiting workflow (status={self._status.value!r})"
+                )
+                return
+
             # Check if Temporal recommends we continue-as-new
             if workflow.info().is_continue_as_new_suggested():
                 workflow.logger.info(
@@ -279,13 +323,18 @@ class PlantWorkflow:
             # Poll the sensor
             await self._poll_sensor()
 
-            # Sleep for 1 hour, but allow refresh_readings signal to wake us early
+            # Sleep for 1 hour, but allow refresh_readings or stop signal to wake us early
             self._force_poll = False
             try:
                 await workflow.wait_condition(
-                    lambda: self._force_poll,
+                    lambda: self._force_poll or self._stop_requested,
                     timeout=POLL_INTERVAL,
                 )
+                if self._stop_requested:
+                    workflow.logger.info(
+                        f"[{self._name}] Woken by terminal status signal — exiting"
+                    )
+                    return
                 workflow.logger.info(f"[{self._name}] Early wakeup due to refresh signal")
             except asyncio.TimeoutError:
                 pass  # Normal hourly tick
