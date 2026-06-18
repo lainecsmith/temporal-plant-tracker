@@ -169,15 +169,54 @@ class PlantWorkflow:
     # Signals
     # -----------------------------------------------------------------------
 
-    #TODO: this should be an update
-    @workflow.signal
+    @workflow.update
     def update_care_ranges(self, care_ranges: CareRanges) -> None:
-        """User has edited the care ranges from the UI."""
+        """User has edited the care ranges from the UI.
+
+        Converted from signal → update so that validation errors are returned
+        synchronously to the caller instead of being silently dropped.
+        """
         workflow.logger.info(
             f"[{self._name}] Care ranges updated by user"
         )
         self._care_ranges = care_ranges
         self._care_ranges_source = "manual"
+
+    @update_care_ranges.validator
+    def validate_update_care_ranges(self, care_ranges: CareRanges) -> None:
+        """Validate ranges before applying.
+
+        Runs before any state mutation — if this raises, the handler is never
+        called and the rejection reason is returned synchronously to the caller.
+        This is the key advantage of Updates over Signals for entity patterns.
+        """
+        errors: list[str] = []
+        if care_ranges.soil_moisture_min > care_ranges.soil_moisture_max:
+            errors.append(
+                f"soil_moisture_min ({care_ranges.soil_moisture_min}) "
+                f"must be ≤ soil_moisture_max ({care_ranges.soil_moisture_max})"
+            )
+        if care_ranges.temperature_min > care_ranges.temperature_max:
+            errors.append(
+                f"temperature_min ({care_ranges.temperature_min}) "
+                f"must be ≤ temperature_max ({care_ranges.temperature_max})"
+            )
+        if care_ranges.air_humidity_min > care_ranges.air_humidity_max:
+            errors.append(
+                f"air_humidity_min ({care_ranges.air_humidity_min}) "
+                f"must be ≤ air_humidity_max ({care_ranges.air_humidity_max})"
+            )
+        if (
+            care_ranges.light_lux_min is not None
+            and care_ranges.light_lux_max is not None
+            and care_ranges.light_lux_min > care_ranges.light_lux_max
+        ):
+            errors.append(
+                f"light_lux_min ({care_ranges.light_lux_min}) "
+                f"must be ≤ light_lux_max ({care_ranges.light_lux_max})"
+            )
+        if errors:
+            raise ValueError("; ".join(errors))
 
     @workflow.signal
     def associate_sensor(self, sensor_entity_id: str) -> None:
@@ -207,22 +246,17 @@ class PlantWorkflow:
         workflow.logger.info(f"[{self._name}] Immediate refresh requested")
         self._force_poll = True
 
-    @workflow.signal
+    @workflow.update
     def set_plant_status(self, status: str) -> None:
         """
         Change the plant's lifecycle status.
 
+        Converted from signal → update so that unknown status values are
+        rejected synchronously to the caller instead of being silently dropped.
         If the new status is a terminal status (e.g. 'dead', 'given_away'),
-        the workflow will exit cleanly after this signal is processed.
+        the workflow will exit cleanly after this update is processed.
         """
-        try:
-            new_status = PlantStatus(status)
-        except ValueError:
-            workflow.logger.error(
-                f"[{self._name}] Unknown status {status!r} — ignoring"
-            )
-            return
-
+        new_status = PlantStatus(status)  # already validated by the validator below
         workflow.logger.info(
             f"[{self._name}] Status changed to {new_status.value!r}"
         )
@@ -233,6 +267,17 @@ class PlantWorkflow:
                 f"[{self._name}] Terminal status set — workflow will exit cleanly"
             )
             self._stop_requested = True
+
+    @set_plant_status.validator
+    def validate_set_plant_status(self, status: str) -> None:
+        """Reject unknown status strings before any state mutation."""
+        try:
+            PlantStatus(status)
+        except ValueError:
+            valid = ", ".join(f"'{s.value}'" for s in PlantStatus)
+            raise ValueError(
+                f"Unknown plant status {status!r}. Valid values: {valid}"
+            )
 
     # -----------------------------------------------------------------------
     # Query

@@ -11,8 +11,17 @@ async function request<T>(
     ...options,
   });
   if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(`API ${res.status}: ${detail}`);
+    const text = await res.text();
+    // FastAPI error responses are JSON: { "detail": "..." }
+    // Extract the detail string for clean error messages (e.g. validation rejections).
+    let detail = text;
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed?.detail === "string") detail = parsed.detail;
+    } catch {
+      // Not JSON — use raw text as-is
+    }
+    throw new Error(detail);
   }
   return res.json() as Promise<T>;
 }

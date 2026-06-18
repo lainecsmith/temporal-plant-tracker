@@ -11,7 +11,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowUpdateFailedError
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -189,15 +189,22 @@ async def get_plant(plant_id: str):
 
 @app.put("/plants/{plant_id}/care-ranges", response_model=PlantState)
 async def update_care_ranges(plant_id: str, body: UpdateCareRangesRequest):
-    """Send a signal to update the care ranges for a plant."""
+    """Update the care ranges for a plant with synchronous validation.
+
+    Uses a Temporal Update (not Signal) so that:
+    - The validator runs before any state mutation.
+    - Validation errors are returned synchronously to the caller.
+    - No sleep/polling hack is needed — execute_update blocks until processed.
+    """
     handle = await _get_plant_handle(plant_id)
     try:
-        await handle.signal(PlantWorkflow.update_care_ranges, body.care_ranges)
-        # Small wait to let the signal be processed, then re-query
-        import asyncio
-        await asyncio.sleep(0.3)
+        await handle.execute_update(PlantWorkflow.update_care_ranges, body.care_ranges)
         state: PlantState = await handle.query(PlantWorkflow.get_state)
         return state
+    except WorkflowUpdateFailedError as e:
+        # Validator raised — return the rejection reason as HTTP 422
+        detail = str(e.cause) if e.cause else str(e)
+        raise HTTPException(status_code=422, detail=detail)
     except RPCError as e:
         if e.status == RPCStatusCode.NOT_FOUND:
             raise HTTPException(status_code=404, detail=f"Plant {plant_id!r} not found")
@@ -258,27 +265,24 @@ async def refresh_plant(plant_id: str):
 @app.post("/plants/{plant_id}/status", response_model=PlantState)
 async def update_plant_status(plant_id: str, body: UpdatePlantStatusRequest):
     """
-    Change the lifecycle status of a plant.
+    Change the lifecycle status of a plant with synchronous validation.
 
-    Terminal statuses (e.g. 'dead', 'given_away') will signal the workflow to
-    exit cleanly. The last-known state is returned before the workflow completes.
-    Non-terminal statuses update the status in-place without ending the workflow.
+    Uses a Temporal Update (not Signal) so that unknown status strings are
+    rejected synchronously rather than silently dropped.
+    Terminal statuses (e.g. 'dead', 'given_away') cause the workflow to exit
+    cleanly; the last-known state is returned before it fully completes.
     """
     handle = await _get_plant_handle(plant_id)
     is_terminal = body.status in TERMINAL_STATUSES
     try:
-        await handle.signal(PlantWorkflow.set_plant_status, body.status.value)
+        await handle.execute_update(PlantWorkflow.set_plant_status, body.status.value)
 
-        # Give the workflow a moment to process the signal and update its state.
-        # For terminal statuses we wait a bit longer since the workflow exits.
-        await asyncio.sleep(0.5 if is_terminal else 0.3)
-
-        # After a terminal signal the workflow may have already completed, so
-        # querying it will fail. Return a best-effort state using what we know.
+        # For terminal statuses the workflow begins exiting immediately after the
+        # update is processed — the query may race with completion, so fall back
+        # gracefully if the workflow is already gone.
         if is_terminal:
             from models.plant import CareRanges
             from datetime import datetime
-            # Attempt a final query; fall back gracefully if the workflow is gone.
             try:
                 state: PlantState = await handle.query(PlantWorkflow.get_state)
             except Exception:
@@ -299,6 +303,10 @@ async def update_plant_status(plant_id: str, body: UpdatePlantStatusRequest):
 
         state = await handle.query(PlantWorkflow.get_state)
         return state
+    except WorkflowUpdateFailedError as e:
+        # Validator rejected the status value — return the reason as HTTP 422
+        detail = str(e.cause) if e.cause else str(e)
+        raise HTTPException(status_code=422, detail=detail)
     except RPCError as e:
         if e.status == RPCStatusCode.NOT_FOUND:
             raise HTTPException(status_code=404, detail=f"Plant {plant_id!r} not found")

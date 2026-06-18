@@ -113,7 +113,6 @@ function MetricBar({
 export function PlantCard({ plant, onUpdate, onRemove }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [savingRanges, setSavingRanges] = useState(false);
   const [showSensorModal, setShowSensorModal] = useState(false);
   const [showStatusMenu, setShowStatusMenu] = useState(false);
   const [changingStatus, setChangingStatus] = useState(false);
@@ -134,16 +133,10 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
     }
   }
 
-  async function handleRangesChange(ranges: CareRanges) {
-    setSavingRanges(true);
-    try {
-      const updated = await api.updateCareRanges(plant.plant_id, ranges);
-      onUpdate(updated);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setSavingRanges(false);
-    }
+  async function handleRangesChange(ranges: CareRanges): Promise<void> {
+    // Let errors propagate to CareRangesEditor so it can show them inline.
+    const updated = await api.updateCareRanges(plant.plant_id, ranges);
+    onUpdate(updated);
   }
 
   async function handleStatusChange(newStatus: PlantStatus) {
@@ -402,15 +395,11 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
           <div style={{ fontWeight: 600, fontSize: 14, color: "#374151", marginBottom: 10 }}>
             Care Ranges
           </div>
-          {savingRanges ? (
-            <p style={{ fontSize: 13, color: "#6b7280" }}>Saving…</p>
-          ) : (
-            <CareRangesEditor
-              ranges={plant.care_ranges}
-              source={plant.care_ranges_source}
-              onChange={handleRangesChange}
-            />
-          )}
+          <CareRangesEditor
+            ranges={plant.care_ranges}
+            source={plant.care_ranges_source}
+            onChange={handleRangesChange}
+          />
         </div>
       )}
       {showSensorModal && (
