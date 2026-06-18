@@ -1,6 +1,7 @@
-import React, { useState } from "react";
-import { Droplets, Thermometer, Wind, Sun, RefreshCw, ChevronDown, ChevronUp } from "lucide-react";
-import type { PlantState, CareRanges } from "../types";
+import React, { useRef, useState } from "react";
+import { Droplets, Thermometer, Wind, Sun, RefreshCw, ChevronDown, ChevronUp, MoreHorizontal } from "lucide-react";
+import type { PlantState, CareRanges, PlantStatus } from "../types";
+import { TERMINAL_STATUSES } from "../types";
 import { CareRangesEditor } from "./CareRangesEditor";
 import { AssociateSensorModal } from "./AssociateSensorModal";
 import { api } from "../api/client";
@@ -8,19 +9,30 @@ import { api } from "../api/client";
 interface Props {
   plant: PlantState;
   onUpdate: (updated: PlantState) => void;
+  onRemove: (plantId: string) => void;
 }
 
 const STATUS_COLORS: Record<string, { bg: string; border: string; dot: string }> = {
-  ok:      { bg: "#f0fdf4", border: "#86efac", dot: "#16a34a" },
-  warning: { bg: "#fffbeb", border: "#fcd34d", dot: "#d97706" },
-  unknown: { bg: "#f8fafc", border: "#cbd5e1", dot: "#94a3b8" },
+  ok:         { bg: "#f0fdf4", border: "#86efac", dot: "#16a34a" },
+  warning:    { bg: "#fffbeb", border: "#fcd34d", dot: "#d97706" },
+  unknown:    { bg: "#f8fafc", border: "#cbd5e1", dot: "#94a3b8" },
+  dead:       { bg: "#fef2f2", border: "#fca5a5", dot: "#dc2626" },
+  given_away: { bg: "#eff6ff", border: "#93c5fd", dot: "#2563eb" },
 };
 
 const STATUS_LABELS: Record<string, string> = {
-  ok: "Healthy",
-  warning: "Needs Attention",
-  unknown: "No Sensor",
+  ok:         "Healthy",
+  warning:    "Needs Attention",
+  unknown:    "No Sensor",
+  dead:       "Dead",
+  given_away: "Given Away",
 };
+
+/** Options shown in the "Change Status" dropdown (terminal statuses only) */
+const STATUS_CHANGE_OPTIONS: { value: PlantStatus; label: string; emoji: string }[] = [
+  { value: "dead",       label: "Mark as Dead",       emoji: "☠️" },
+  { value: "given_away", label: "Mark as Given Away",  emoji: "🎁" },
+];
 
 function MetricBar({
   icon,
@@ -98,11 +110,14 @@ function MetricBar({
   );
 }
 
-export function PlantCard({ plant, onUpdate }: Props) {
+export function PlantCard({ plant, onUpdate, onRemove }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [savingRanges, setSavingRanges] = useState(false);
   const [showSensorModal, setShowSensorModal] = useState(false);
+  const [showStatusMenu, setShowStatusMenu] = useState(false);
+  const [changingStatus, setChangingStatus] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
   const colors = STATUS_COLORS[plant.status] ?? STATUS_COLORS.unknown;
   const r = plant.last_readings;
   const cr = plant.care_ranges;
@@ -128,6 +143,31 @@ export function PlantCard({ plant, onUpdate }: Props) {
       console.error(e);
     } finally {
       setSavingRanges(false);
+    }
+  }
+
+  async function handleStatusChange(newStatus: PlantStatus) {
+    setShowStatusMenu(false);
+    const isTerminal = TERMINAL_STATUSES.has(newStatus);
+    const label = STATUS_LABELS[newStatus] ?? newStatus;
+    const confirmed = window.confirm(
+      `Mark "${plant.name}" as ${label}?${
+        isTerminal ? "\n\nThis will end the plant's workflow and remove it from the dashboard." : ""
+      }`
+    );
+    if (!confirmed) return;
+
+    setChangingStatus(true);
+    try {
+      await api.updateStatus(plant.plant_id, newStatus);
+      if (isTerminal) {
+        onRemove(plant.plant_id);
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Failed to update plant status. Please try again.");
+    } finally {
+      setChangingStatus(false);
     }
   }
 
@@ -192,6 +232,73 @@ export function PlantCard({ plant, onUpdate }: Props) {
               {refreshing ? "…" : "Refresh"}
             </button>
           )}
+
+          {/* Change Status menu */}
+          <div ref={menuRef} style={{ position: "relative" }}>
+            <button
+              onClick={() => setShowStatusMenu((v) => !v)}
+              disabled={changingStatus}
+              title="Change plant status"
+              style={{
+                border: "1px solid #d1d5db",
+                borderRadius: 6,
+                padding: "4px 8px",
+                background: "#fff",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                fontSize: 12,
+                color: "#374151",
+              }}
+            >
+              <MoreHorizontal size={14} />
+            </button>
+            {showStatusMenu && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "calc(100% + 4px)",
+                  right: 0,
+                  background: "#fff",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 8,
+                  boxShadow: "0 4px 12px rgba(0,0,0,0.12)",
+                  minWidth: 190,
+                  zIndex: 100,
+                  overflow: "hidden",
+                }}
+              >
+                <div style={{ padding: "6px 12px", fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                  Change Status
+                </div>
+                {STATUS_CHANGE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    onClick={() => handleStatusChange(opt.value)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      width: "100%",
+                      padding: "8px 12px",
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      fontSize: 13,
+                      color: "#374151",
+                      textAlign: "left",
+                    }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = "#f9fafb")}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+                  >
+                    <span>{opt.emoji}</span>
+                    <span>{opt.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
           <button
             onClick={() => setExpanded((v) => !v)}
             style={{
@@ -257,7 +364,7 @@ export function PlantCard({ plant, onUpdate }: Props) {
             value={r.temperature}
             min={cr.temperature_min}
             max={cr.temperature_max}
-            unit="°C"
+            unit="°F"
             isOutOfRange={plant.out_of_range_fields.includes("temperature")}
           />
           <MetricBar

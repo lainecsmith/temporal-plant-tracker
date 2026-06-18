@@ -319,6 +319,7 @@ export function AddPlantModal({ onClose, onCreated }: Props) {
                 <CareRangesEditor
                   ranges={plant.care_ranges}
                   source={plant.care_ranges_source}
+                  reasoning={plant.care_ranges_source === "ai" ? (plant.care_ranges_reasoning ?? undefined) : undefined}
                   onChange={(ranges) =>
                     // Propagate user edits back up so "These look good →" sends
                     // the edited values (not the original fetched ones).

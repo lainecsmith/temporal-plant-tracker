@@ -28,6 +28,23 @@ class CareRanges(BaseModel):
     )
 
 
+class CareRangesWithReasoning(CareRanges):
+    """CareRanges extended with GPT-4o explanations for each metric range."""
+
+    soil_moisture_reasoning: str = Field(
+        description="Why this soil moisture range was chosen for this species"
+    )
+    temperature_reasoning: str = Field(
+        description="Why this temperature range was chosen for this species"
+    )
+    air_humidity_reasoning: str = Field(
+        description="Why this air humidity range was chosen for this species"
+    )
+    light_lux_reasoning: str = Field(
+        description="Why this light level range was chosen for this species"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Sensor readings — current values from the Zigbee sensor
 # ---------------------------------------------------------------------------
@@ -50,6 +67,15 @@ class PlantStatus(str, Enum):
     OK = "ok"
     WARNING = "warning"       # one or more metrics out of range
     UNKNOWN = "unknown"       # no sensor associated yet, or no readings
+    DEAD = "dead"             # plant has died — workflow ends
+    GIVEN_AWAY = "given_away" # plant was given away — workflow ends
+
+
+# Statuses that cause the workflow to complete (easy to extend later)
+TERMINAL_STATUSES: frozenset[PlantStatus] = frozenset({
+    PlantStatus.DEAD,
+    PlantStatus.GIVEN_AWAY,
+})
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +92,8 @@ class PlantState(BaseModel):
     care_ranges: CareRanges
     # Where the care ranges came from
     care_ranges_source: str = "unknown"  # "openplantbook" | "ai" | "manual"
+    # Per-metric AI reasoning — only populated when care_ranges_source == "ai"
+    care_ranges_reasoning: Optional[dict[str, str]] = None
 
     # Legacy single-entity association (kept for backward compat)
     sensor_entity_id: Optional[str] = None  # HA entity id, e.g. "sensor.miflora_1"
@@ -141,3 +169,8 @@ class AssociateDeviceRequest(BaseModel):
     device_id: str
     device_name: str
     sensor_entities: dict[str, str]  # device_class -> entity_id
+
+
+class UpdatePlantStatusRequest(BaseModel):
+    """Request to change a plant's lifecycle status."""
+    status: PlantStatus

@@ -26,7 +26,7 @@ with workflow.unsafe.imports_passed_through():
         trigger_ha_alert,
         clear_ha_alert_light,
     )
-    from models.plant import CareRanges, PlantState, PlantStatus, SensorReadings
+    from models.plant import CareRanges, CareRangesWithReasoning, PlantState, PlantStatus, SensorReadings, TERMINAL_STATUSES
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +63,8 @@ class PlantWorkflowContinuation:
     sensor_device_id: Optional[str] = None
     sensor_device_name: Optional[str] = None
     sensor_entities: Optional[dict] = None  # device_class -> entity_id
+    # Per-metric AI reasoning (populated only when source == "ai")
+    care_ranges_reasoning: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +100,7 @@ class PlantWorkflow:
         # -------------------------------------------------------------------
         self._care_ranges: Optional[CareRanges] = None
         self._care_ranges_source: str = "unknown"
+        self._care_ranges_reasoning: Optional[dict[str, str]] = None
         self._ranges_already_fetched: bool = False
 
         # -------------------------------------------------------------------
@@ -129,6 +132,7 @@ class PlantWorkflow:
             if input.care_ranges is not None:
                 self._care_ranges = input.care_ranges
             self._care_ranges_source = input.care_ranges_source
+            self._care_ranges_reasoning = input.care_ranges_reasoning or None
             self._ranges_already_fetched = input.ranges_already_fetched
             self._sensor_entity_id = input.sensor_entity_id
             self._sensor_device_id = input.sensor_device_id
@@ -149,6 +153,9 @@ class PlantWorkflow:
 
         # Force-wakeup flag used to skip sleep on refresh_readings signal
         self._force_poll: bool = False
+
+        # Set to True when a terminal status is received — causes workflow to exit cleanly
+        self._stop_requested: bool = False
 
     # -----------------------------------------------------------------------
     # Helpers: is a sensor associated?
@@ -200,6 +207,33 @@ class PlantWorkflow:
         workflow.logger.info(f"[{self._name}] Immediate refresh requested")
         self._force_poll = True
 
+    @workflow.signal
+    def set_plant_status(self, status: str) -> None:
+        """
+        Change the plant's lifecycle status.
+
+        If the new status is a terminal status (e.g. 'dead', 'given_away'),
+        the workflow will exit cleanly after this signal is processed.
+        """
+        try:
+            new_status = PlantStatus(status)
+        except ValueError:
+            workflow.logger.error(
+                f"[{self._name}] Unknown status {status!r} — ignoring"
+            )
+            return
+
+        workflow.logger.info(
+            f"[{self._name}] Status changed to {new_status.value!r}"
+        )
+        self._status = new_status
+
+        if new_status in TERMINAL_STATUSES:
+            workflow.logger.info(
+                f"[{self._name}] Terminal status set — workflow will exit cleanly"
+            )
+            self._stop_requested = True
+
     # -----------------------------------------------------------------------
     # Query
     # -----------------------------------------------------------------------
@@ -217,6 +251,7 @@ class PlantWorkflow:
                 air_humidity_min=0, air_humidity_max=100,
             ),
             care_ranges_source=self._care_ranges_source,
+            care_ranges_reasoning=self._care_ranges_reasoning,
             sensor_entity_id=self._sensor_entity_id,
             sensor_device_id=self._sensor_device_id,
             sensor_device_name=self._sensor_device_name,
@@ -248,7 +283,14 @@ class PlantWorkflow:
             workflow.logger.info(
                 f"[{self._name}] Waiting for sensor association..."
             )
-            await workflow.wait_condition(self._has_sensor)
+            await workflow.wait_condition(
+                lambda: self._has_sensor() or self._stop_requested
+            )
+            if self._stop_requested:
+                workflow.logger.info(
+                    f"[{self._name}] Terminal status received while awaiting sensor — exiting"
+                )
+                return
             workflow.logger.info(
                 f"[{self._name}] Sensor associated: device={self._sensor_device_id!r} "
                 f"entity={self._sensor_entity_id!r}"
@@ -262,6 +304,13 @@ class PlantWorkflow:
         )
 
         while True:
+            # Exit cleanly if a terminal status was signalled
+            if self._stop_requested:
+                workflow.logger.info(
+                    f"[{self._name}] Exiting workflow (status={self._status.value!r})"
+                )
+                return
+
             # Check if Temporal recommends we continue-as-new
             if workflow.info().is_continue_as_new_suggested():
                 workflow.logger.info(
@@ -274,13 +323,18 @@ class PlantWorkflow:
             # Poll the sensor
             await self._poll_sensor()
 
-            # Sleep for 1 hour, but allow refresh_readings signal to wake us early
+            # Sleep for 1 hour, but allow refresh_readings or stop signal to wake us early
             self._force_poll = False
             try:
                 await workflow.wait_condition(
-                    lambda: self._force_poll,
+                    lambda: self._force_poll or self._stop_requested,
                     timeout=POLL_INTERVAL,
                 )
+                if self._stop_requested:
+                    workflow.logger.info(
+                        f"[{self._name}] Woken by terminal status signal — exiting"
+                    )
+                    return
                 workflow.logger.info(f"[{self._name}] Early wakeup due to refresh signal")
             except asyncio.TimeoutError:
                 pass  # Normal hourly tick
@@ -321,7 +375,7 @@ class PlantWorkflow:
             workflow.logger.info(
                 f"[{self._name}] Not found in OpenPlantbook — asking AI"
             )
-            ai_ranges: CareRanges = await workflow.execute_activity(
+            ai_ranges: CareRangesWithReasoning = await workflow.execute_activity(
                 get_care_ranges_from_ai,
                 self._species,
                 start_to_close_timeout=timedelta(seconds=90),
@@ -331,6 +385,13 @@ class PlantWorkflow:
                     maximum_attempts=3,
                 ),
             )
+            # Extract reasoning before temperature conversion (model_copy preserves it)
+            self._care_ranges_reasoning = {
+                "soil_moisture_reasoning": ai_ranges.soil_moisture_reasoning,
+                "temperature_reasoning": ai_ranges.temperature_reasoning,
+                "air_humidity_reasoning": ai_ranges.air_humidity_reasoning,
+                "light_lux_reasoning": ai_ranges.light_lux_reasoning,
+            }
             # AI returns temperatures in Celsius — convert to Fahrenheit
             self._care_ranges = _convert_care_ranges_temp_to_f(ai_ranges)
             self._care_ranges_source = "ai"
@@ -417,6 +478,7 @@ class PlantWorkflow:
             species=self._species,
             care_ranges=self._care_ranges,
             care_ranges_source=self._care_ranges_source,
+            care_ranges_reasoning=self._care_ranges_reasoning,
             sensor_entity_id=self._sensor_entity_id,
             sensor_device_id=self._sensor_device_id,
             sensor_device_name=self._sensor_device_name,

@@ -10,7 +10,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from models.config import settings
-from models.plant import CareRanges
+from models.plant import CareRanges, CareRangesWithReasoning
 
 # ---------------------------------------------------------------------------
 # OpenAI client — retries disabled; Temporal handles retries
@@ -29,12 +29,13 @@ def _get_openai_client() -> AsyncOpenAI:
 # ---------------------------------------------------------------------------
 
 @activity.defn
-async def get_care_ranges_from_ai(species: str) -> CareRanges:
+async def get_care_ranges_from_ai(species: str) -> CareRangesWithReasoning:
     """
     Use GPT-4o with structured outputs to determine acceptable care ranges
     for a plant species not found in OpenPlantbook.
 
-    Returns a CareRanges object with AI-suggested values.
+    Returns a CareRangesWithReasoning object with AI-suggested values and
+    a plain-English explanation for each range.
     """
     activity.logger.info(f"Asking GPT-4o for care ranges for species: {species!r}")
 
@@ -47,8 +48,18 @@ async def get_care_ranges_from_ai(species: str) -> CareRanges:
         "All temperature values should be in Celsius. "
         "Soil moisture and humidity values should be percentages (0-100). "
         "Light values should be in lux. "
-        "If you are uncertain of a value, provide a reasonable typical range. "
-        "Do not include any explanation — only the structured data."
+        "For soil moisture specifically: "
+        "  soil_moisture_min is the dry threshold — the level at which the plant "
+        "  should next be watered. For drought-tolerant or xeric species (cacti, "
+        "  succulents, etc.) this should be very low, reflecting that the soil must dry out completely before the next watering. "
+        "  It should always be higher than 0, however, because 0 always means that the plant needs to be watered. "
+        "  soil_moisture_max is the level reached immediately after a thorough "
+        "  watering. Do not return a range that represents a 'comfortable steady "
+        "  state' — return the actual min/max that the watering cycle produces. "
+        "If you are uncertain of a value, provide a reasonable typical range for the species. "
+        "For each metric, also include a brief plain-English explanation (1-2 sentences) "
+        "of why you chose that range for the given species — covering its natural habitat "
+        "or growth requirements as appropriate."
     )
 
     user_prompt = (
@@ -64,7 +75,7 @@ async def get_care_ranges_from_ai(species: str) -> CareRanges:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            response_format=CareRanges,
+            response_format=CareRangesWithReasoning,
             temperature=0.2,
         )
 

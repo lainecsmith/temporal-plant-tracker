@@ -1,4 +1,4 @@
-import type { CareRanges, HADevice, HASensor, PlantState } from "../types";
+import type { CareRanges, HADevice, HASensor, PlantState, PlantStatus } from "../types";
 
 const BASE = "/api";
 
@@ -65,6 +65,13 @@ export const api = {
 
   refreshReadings: (plantId: string): Promise<PlantState> =>
     request(`/plants/${plantId}/refresh`, { method: "POST" }),
+
+  /** Update the lifecycle status of a plant (e.g. "dead", "given_away") */
+  updateStatus: (plantId: string, status: PlantStatus): Promise<PlantState> =>
+    request(`/plants/${plantId}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status }),
+    }),
 
   // ---- Sensors / Devices --------------------------------------------------
 
