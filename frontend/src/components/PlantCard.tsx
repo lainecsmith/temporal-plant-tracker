@@ -339,6 +339,52 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
         </button>
       </div>
 
+      {/* Last-error notices — desired-vs-applied pattern */}
+      {(plant.last_association_error ||
+        plant.last_sensor_read_error ||
+        plant.last_care_ranges_fetch_error ||
+        plant.last_alert_error) && (
+        <div style={{ marginTop: 8, marginLeft: 18, display: "flex", flexDirection: "column", gap: 4 }}>
+          {[
+            { label: "Association", msg: plant.last_association_error },
+            { label: "Sensor read", msg: plant.last_sensor_read_error },
+            { label: "Care ranges", msg: plant.last_care_ranges_fetch_error },
+            { label: "HA alert", msg: plant.last_alert_error },
+          ]
+            .filter((e) => e.msg)
+            .map((e) => (
+              <div
+                key={e.label}
+                title={e.msg ?? undefined}
+                style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: 6,
+                  fontSize: 11,
+                  color: "#92400e",
+                  background: "#fef3c7",
+                  border: "1px solid #fcd34d",
+                  borderRadius: 6,
+                  padding: "3px 8px",
+                  lineHeight: 1.4,
+                }}
+              >
+                <span style={{ flexShrink: 0, fontWeight: 600 }}>⚠ {e.label}:</span>
+                <span
+                  style={{
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    maxWidth: 320,
+                  }}
+                >
+                  {e.msg}
+                </span>
+              </div>
+            ))}
+        </div>
+      )}
+
       {/* Live readings */}
       {r && (
         <div style={{ marginTop: 12 }}>

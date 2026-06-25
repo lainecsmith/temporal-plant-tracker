@@ -7,7 +7,7 @@ interface Props {
   /** Per-metric AI reasoning — only passed when source === "ai" */
   reasoning?: Record<string, string>;
   /** Called when the user saves; must return a Promise so validation errors surface inline. */
-  onChange: (updated: CareRanges) => Promise<void>;
+  onChange: (updated: CareRanges) => void | Promise<void>;
   readOnly?: boolean;
 }
 

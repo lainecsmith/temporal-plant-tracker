@@ -65,6 +65,11 @@ class PlantWorkflowContinuation:
     sensor_entities: Optional[dict] = None  # device_class -> entity_id
     # Per-metric AI reasoning (populated only when source == "ai")
     care_ranges_reasoning: Optional[dict] = None
+    # Last-error fields — desired-vs-applied pattern
+    last_association_error: Optional[str] = None
+    last_sensor_read_error: Optional[str] = None
+    last_care_ranges_fetch_error: Optional[str] = None
+    last_alert_error: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +156,23 @@ class PlantWorkflow:
                 except (ValueError, TypeError):
                     pass
 
+        # -------------------------------------------------------------------
+        # Last-error fields — desired-vs-applied pattern.
+        # Each is None when the last operation succeeded; set to an error string
+        # on failure. They persist across continue-as-new via the continuation.
+        # -------------------------------------------------------------------
+        self._last_association_error: Optional[str] = None
+        self._last_sensor_read_error: Optional[str] = None
+        self._last_care_ranges_fetch_error: Optional[str] = None
+        self._last_alert_error: Optional[str] = None
+
+        # Restore error fields from continuation
+        if isinstance(input, PlantWorkflowContinuation):
+            self._last_association_error = input.last_association_error
+            self._last_sensor_read_error = input.last_sensor_read_error
+            self._last_care_ranges_fetch_error = input.last_care_ranges_fetch_error
+            self._last_alert_error = input.last_alert_error
+
         # Force-wakeup flag used to skip sleep on refresh_readings signal
         self._force_poll: bool = False
 
@@ -228,7 +250,12 @@ class PlantWorkflow:
 
     @workflow.signal
     def associate_device(self, device_id: str, device_name: str, sensor_entities: dict) -> None:
-        """Associate a Home Assistant device (with its entity map) with this plant."""
+        """Associate a Home Assistant device (with its entity map) with this plant.
+
+        Stores a last_association_error if the entity map is empty — the desired
+        state (device selected) is recorded, but the applied state is flagged as
+        unusable until a valid entity map is provided.
+        """
         workflow.logger.info(
             f"[{self._name}] Device associated: {device_name!r} ({device_id}), "
             f"entities: {list(sensor_entities.keys())}"
@@ -236,8 +263,18 @@ class PlantWorkflow:
         self._sensor_device_id = device_id
         self._sensor_device_name = device_name
         self._sensor_entities = sensor_entities
-        # Also set sensor_entity_id to the first available entity for backward compat
-        if sensor_entities:
+
+        if not sensor_entities:
+            # Record the failure — no readable entities, can't poll this device
+            err = (
+                f"Device {device_name!r} ({device_id}) has no readable sensor entities. "
+                "Sensor polling will not start until a valid device is associated."
+            )
+            workflow.logger.warning(f"[{self._name}] {err}")
+            self._last_association_error = err
+        else:
+            # Valid association — clear any prior error and set the legacy entity_id
+            self._last_association_error = None
             self._sensor_entity_id = next(iter(sensor_entities.values()))
 
     @workflow.signal
@@ -306,6 +343,11 @@ class PlantWorkflow:
             status=self._status,
             created_at=self._created_at,
             last_checked_at=self._last_checked_at,
+            # Last-error fields — desired-vs-applied pattern
+            last_association_error=self._last_association_error,
+            last_sensor_read_error=self._last_sensor_read_error,
+            last_care_ranges_fetch_error=self._last_care_ranges_fetch_error,
+            last_alert_error=self._last_alert_error,
         )
 
     # -----------------------------------------------------------------------
@@ -389,7 +431,13 @@ class PlantWorkflow:
     # -----------------------------------------------------------------------
 
     async def _fetch_care_ranges(self) -> None:
-        """Try OpenPlantbook first; fall back to GPT-4o if not found."""
+        """Try OpenPlantbook first; fall back to GPT-4o if not found.
+
+        If both sources fail after their retry budgets are exhausted, the error
+        is stored in last_care_ranges_fetch_error and the workflow continues
+        (waiting for a sensor association) rather than crashing.  The user can
+        manually set care ranges from the UI once the workflow is running.
+        """
         workflow.logger.info(
             f"[{self._name}] Fetching care ranges for species: {self._species!r}"
         )
@@ -400,51 +448,62 @@ class PlantWorkflow:
             maximum_attempts=5,
         )
 
-        # Try OpenPlantbook
-        care_ranges: Optional[CareRanges] = await workflow.execute_activity(
-            search_openplantbook,
-            self._species,
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=retry_policy,
-        )
-
-        if care_ranges is not None:
-            workflow.logger.info(
-                f"[{self._name}] Found care ranges in OpenPlantbook"
-            )
-            # OpenPlantbook returns temperatures in Celsius — convert to Fahrenheit
-            self._care_ranges = _convert_care_ranges_temp_to_f(care_ranges)
-            self._care_ranges_source = "openplantbook"
-        else:
-            # Fallback to AI
-            workflow.logger.info(
-                f"[{self._name}] Not found in OpenPlantbook — asking AI"
-            )
-            ai_ranges: CareRangesWithReasoning = await workflow.execute_activity(
-                get_care_ranges_from_ai,
+        try:
+            # Try OpenPlantbook
+            care_ranges: Optional[CareRanges] = await workflow.execute_activity(
+                search_openplantbook,
                 self._species,
-                start_to_close_timeout=timedelta(seconds=90),
-                retry_policy=RetryPolicy(
-                    initial_interval=timedelta(seconds=10),
-                    maximum_interval=timedelta(minutes=5),
-                    maximum_attempts=3,
-                ),
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=retry_policy,
             )
-            # Extract reasoning before temperature conversion (model_copy preserves it)
-            self._care_ranges_reasoning = {
-                "soil_moisture_reasoning": ai_ranges.soil_moisture_reasoning,
-                "temperature_reasoning": ai_ranges.temperature_reasoning,
-                "air_humidity_reasoning": ai_ranges.air_humidity_reasoning,
-                "light_lux_reasoning": ai_ranges.light_lux_reasoning,
-            }
-            # AI returns temperatures in Celsius — convert to Fahrenheit
-            self._care_ranges = _convert_care_ranges_temp_to_f(ai_ranges)
-            self._care_ranges_source = "ai"
 
-        self._ranges_already_fetched = True
-        workflow.logger.info(
-            f"[{self._name}] Care ranges ready (source: {self._care_ranges_source})"
-        )
+            if care_ranges is not None:
+                workflow.logger.info(
+                    f"[{self._name}] Found care ranges in OpenPlantbook"
+                )
+                # OpenPlantbook returns temperatures in Celsius — convert to Fahrenheit
+                self._care_ranges = _convert_care_ranges_temp_to_f(care_ranges)
+                self._care_ranges_source = "openplantbook"
+            else:
+                # Fallback to AI
+                workflow.logger.info(
+                    f"[{self._name}] Not found in OpenPlantbook — asking AI"
+                )
+                ai_ranges: CareRangesWithReasoning = await workflow.execute_activity(
+                    get_care_ranges_from_ai,
+                    self._species,
+                    start_to_close_timeout=timedelta(seconds=90),
+                    retry_policy=RetryPolicy(
+                        initial_interval=timedelta(seconds=10),
+                        maximum_interval=timedelta(minutes=5),
+                        maximum_attempts=3,
+                    ),
+                )
+                # Extract reasoning before temperature conversion (model_copy preserves it)
+                self._care_ranges_reasoning = {
+                    "soil_moisture_reasoning": ai_ranges.soil_moisture_reasoning,
+                    "temperature_reasoning": ai_ranges.temperature_reasoning,
+                    "air_humidity_reasoning": ai_ranges.air_humidity_reasoning,
+                    "light_lux_reasoning": ai_ranges.light_lux_reasoning,
+                }
+                # AI returns temperatures in Celsius — convert to Fahrenheit
+                self._care_ranges = _convert_care_ranges_temp_to_f(ai_ranges)
+                self._care_ranges_source = "ai"
+
+            # Success — clear any previous fetch error
+            self._last_care_ranges_fetch_error = None
+            self._ranges_already_fetched = True
+            workflow.logger.info(
+                f"[{self._name}] Care ranges ready (source: {self._care_ranges_source})"
+            )
+
+        except Exception as e:
+            err = f"Failed to fetch care ranges for {self._species!r}: {e}"
+            workflow.logger.error(f"[{self._name}] {err}")
+            self._last_care_ranges_fetch_error = err
+            # Mark as fetched so we don't retry on the next continue-as-new — the
+            # user must set ranges manually via update_care_ranges.
+            self._ranges_already_fetched = True
 
     async def _poll_sensor(self) -> None:
         """Read sensor, compare to care ranges, trigger alerts if needed."""
@@ -469,10 +528,15 @@ class PlantWorkflow:
                     maximum_attempts=3,
                 ),
             )
+            # Successful read — clear any previous sensor read error
+            self._last_sensor_read_error = None
         except Exception as e:
-            workflow.logger.error(
-                f"[{self._name}] Failed to read sensor: {e}"
+            err = (
+                f"Sensor read failed for device={self._sensor_device_id!r} "
+                f"entity={self._sensor_entity_id!r}: {e}"
             )
+            workflow.logger.error(f"[{self._name}] {err}")
+            self._last_sensor_read_error = err
             return
 
         self._last_readings = readings
@@ -491,18 +555,24 @@ class PlantWorkflow:
             workflow.logger.warning(
                 f"[{self._name}] Out of range: {out_of_range}"
             )
-            await workflow.execute_activity(
-                trigger_ha_alert,
-                args=[
-                    self._name,
-                    alert_entity,
-                    out_of_range,
-                    readings,
-                    self._care_ranges,
-                ],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=3),
-            )
+            try:
+                await workflow.execute_activity(
+                    trigger_ha_alert,
+                    args=[
+                        self._name,
+                        alert_entity,
+                        out_of_range,
+                        readings,
+                        self._care_ranges,
+                    ],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+                self._last_alert_error = None
+            except Exception as e:
+                err = f"Failed to trigger HA alert for {alert_entity!r}: {e}"
+                workflow.logger.error(f"[{self._name}] {err}")
+                self._last_alert_error = err
         else:
             self._status = PlantStatus.OK
             # If we just cleared a warning, turn the light green
@@ -510,11 +580,17 @@ class PlantWorkflow:
                 workflow.logger.info(
                     f"[{self._name}] All metrics back in range — clearing alert"
                 )
-                await workflow.execute_activity(
-                    clear_ha_alert_light,
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
+                try:
+                    await workflow.execute_activity(
+                        clear_ha_alert_light,
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+                    self._last_alert_error = None
+                except Exception as e:
+                    err = f"Failed to clear HA alert light: {e}"
+                    workflow.logger.error(f"[{self._name}] {err}")
+                    self._last_alert_error = err
 
     def _build_continuation(self) -> "PlantWorkflowContinuation":
         return PlantWorkflowContinuation(
@@ -536,6 +612,11 @@ class PlantWorkflow:
                 self._last_checked_at.isoformat() if self._last_checked_at else None
             ),
             ranges_already_fetched=True,
+            # Persist last-error state across continue-as-new
+            last_association_error=self._last_association_error,
+            last_sensor_read_error=self._last_sensor_read_error,
+            last_care_ranges_fetch_error=self._last_care_ranges_fetch_error,
+            last_alert_error=self._last_alert_error,
         )
 
 

@@ -110,6 +110,29 @@ class PlantState(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_checked_at: Optional[datetime] = None
 
+    # ---------------------------------------------------------------------------
+    # Last-error fields — desired-vs-applied pattern.
+    # Each field is None when the last operation succeeded (or has never been
+    # attempted) and contains an error string when it last failed.
+    # They are cleared automatically when the corresponding operation succeeds.
+    # ---------------------------------------------------------------------------
+
+    # Set when associate_device / associate_sensor receives invalid input
+    # (e.g. empty sensor_entities dict).
+    last_association_error: Optional[str] = None
+
+    # Set when get_sensor_readings fails (bad device ID, HA unreachable, etc.).
+    # Cleared on the next successful sensor read.
+    last_sensor_read_error: Optional[str] = None
+
+    # Set when the care-ranges fetch (OpenPlantbook + AI fallback) fails entirely.
+    # Cleared once care ranges are successfully loaded.
+    last_care_ranges_fetch_error: Optional[str] = None
+
+    # Set when trigger_ha_alert or clear_ha_alert_light fails.
+    # Cleared on the next successful alert / clear call.
+    last_alert_error: Optional[str] = None
+
 
 # ---------------------------------------------------------------------------
 # Home Assistant sensor descriptor (legacy entity-level model)

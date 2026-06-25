@@ -41,6 +41,21 @@ export interface PlantState {
   status: PlantStatus;
   created_at: string;
   last_checked_at: string | null;
+
+  /**
+   * Last-error fields — desired-vs-applied pattern.
+   * Each is null when the last operation succeeded (or was never attempted).
+   * Set to a human-readable error string when the operation last failed.
+   * Automatically cleared when the operation next succeeds.
+   */
+  /** Set when associate_device receives an empty/invalid entity map. */
+  last_association_error: string | null;
+  /** Set when get_sensor_readings fails (bad device ID, HA unreachable, etc.). */
+  last_sensor_read_error: string | null;
+  /** Set when the care-ranges fetch (OpenPlantbook + AI fallback) fails entirely. */
+  last_care_ranges_fetch_error: string | null;
+  /** Set when trigger_ha_alert or clear_ha_alert_light fails. */
+  last_alert_error: string | null;
 }
 
 /** Legacy entity-level sensor (used by /sensors endpoint) */
