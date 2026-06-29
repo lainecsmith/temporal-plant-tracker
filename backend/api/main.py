@@ -30,6 +30,7 @@ from models.plant import (
     TERMINAL_STATUSES,
     UpdateCareRangesRequest,
     UpdatePlantStatusRequest,
+    UpdateRoomRequest,
 )
 from workflows.plant_workflow import PlantWorkflow, PlantWorkflowInput
 
@@ -143,6 +144,7 @@ async def create_plant(body: CreatePlantRequest):
             plant_id=plant_id,
             name=body.name,
             species=body.species,
+            room=body.room,
         ),
         id=f"plant-{plant_id}",
         task_queue=settings.temporal_task_queue,
@@ -387,6 +389,21 @@ async def update_plant_status(plant_id: str, body: UpdatePlantStatusRequest):
         # Validator rejected the status value — return the reason as HTTP 422
         detail = str(e.cause) if e.cause else str(e)
         raise HTTPException(status_code=422, detail=detail)
+    except RPCError as e:
+        if e.status == RPCStatusCode.NOT_FOUND:
+            raise HTTPException(status_code=404, detail=f"Plant {plant_id!r} not found")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/plants/{plant_id}/room", response_model=PlantState)
+async def update_room(plant_id: str, body: UpdateRoomRequest):
+    """Move a plant to a room, or clear its room (room=null)."""
+    handle = await _get_plant_handle(plant_id)
+    try:
+        await handle.signal(PlantWorkflow.set_room, body.room)
+        await asyncio.sleep(0.3)
+        state: PlantState = await handle.query(PlantWorkflow.get_state)
+        return state
     except RPCError as e:
         if e.status == RPCStatusCode.NOT_FOUND:
             raise HTTPException(status_code=404, detail=f"Plant {plant_id!r} not found")

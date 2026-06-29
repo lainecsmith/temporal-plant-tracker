@@ -28,6 +28,7 @@ export interface PlantState {
   plant_id: string;
   name: string;
   species: string;
+  room: string | null;
   care_ranges: CareRanges;
   care_ranges_source: "openplantbook" | "ai" | "manual" | "unknown";
   /** Per-metric AI reasoning strings — only present when care_ranges_source === "ai" */

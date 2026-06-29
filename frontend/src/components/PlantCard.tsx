@@ -120,6 +120,9 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
   const [showSensorModal, setShowSensorModal] = useState(false);
   const [showStatusMenu, setShowStatusMenu] = useState(false);
   const [changingStatus, setChangingStatus] = useState(false);
+  const [showRoomInput, setShowRoomInput] = useState(false);
+  const [roomDraft, setRoomDraft] = useState("");
+  const [savingRoom, setSavingRoom] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const colors = STATUS_COLORS[plant.status] ?? STATUS_COLORS.unknown;
   const r = plant.last_readings;
@@ -141,6 +144,26 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
     // Let errors propagate to CareRangesEditor so it can show them inline.
     const updated = await api.updateCareRanges(plant.plant_id, ranges);
     onUpdate(updated);
+  }
+
+  function openRoomInput() {
+    setRoomDraft(plant.room ?? "");
+    setShowStatusMenu(false);
+    setShowRoomInput(true);
+  }
+
+  async function handleSaveRoom() {
+    setSavingRoom(true);
+    try {
+      const updated = await api.updateRoom(plant.plant_id, roomDraft.trim() || null);
+      onUpdate(updated);
+      setShowRoomInput(false);
+    } catch (e) {
+      console.error(e);
+      alert("Failed to update room. Please try again.");
+    } finally {
+      setSavingRoom(false);
+    }
   }
 
   async function handleStatusChange(newStatus: PlantStatus) {
@@ -338,6 +361,28 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
                     <span>{opt.label}</span>
                   </button>
                 ))}
+                <div style={{ height: 1, background: "#f3f4f6", margin: "4px 0" }} />
+                <button
+                  onClick={openRoomInput}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    width: "100%",
+                    padding: "8px 12px",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: 13,
+                    color: "#374151",
+                    textAlign: "left",
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = "#f9fafb")}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+                >
+                  <span>🏠</span>
+                  <span>{plant.room ? "Move to Room…" : "Assign to Room…"}</span>
+                </button>
               </div>
             )}
           </div>
@@ -360,6 +405,65 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
           </button>
         </div>
       </div>
+
+      {/* Room badge / inline editor */}
+      {showRoomInput ? (
+        <div style={{ marginTop: 8, marginLeft: 18, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, color: "#6b7280" }}>🏠</span>
+          <input
+            autoFocus
+            value={roomDraft}
+            onChange={(e) => setRoomDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") handleSaveRoom(); if (e.key === "Escape") setShowRoomInput(false); }}
+            placeholder="Room name (leave blank to unassign)"
+            disabled={savingRoom}
+            style={{
+              border: "1px solid #d1d5db",
+              borderRadius: 6,
+              padding: "2px 8px",
+              fontSize: 12,
+              width: 200,
+              outline: "none",
+              background: "#fff",
+            }}
+          />
+          <button
+            onClick={handleSaveRoom}
+            disabled={savingRoom}
+            style={{
+              border: "none",
+              borderRadius: 6,
+              padding: "2px 10px",
+              background: savingRoom ? "#86efac" : "#16a34a",
+              cursor: savingRoom ? "not-allowed" : "pointer",
+              fontSize: 12,
+              color: "#fff",
+              fontWeight: 500,
+            }}
+          >
+            {savingRoom ? "Saving…" : "✓ Save"}
+          </button>
+          <button
+            onClick={() => setShowRoomInput(false)}
+            disabled={savingRoom}
+            style={{
+              border: "1px solid #d1d5db",
+              borderRadius: 6,
+              padding: "2px 8px",
+              background: "#fff",
+              cursor: "pointer",
+              fontSize: 12,
+              color: "#6b7280",
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      ) : plant.room ? (
+        <div style={{ marginTop: 4, marginLeft: 18, fontSize: 12, color: "#6b7280" }}>
+          🏠 <span style={{ color: "#374151" }}>{plant.room}</span>
+        </div>
+      ) : null}
 
       {/* Sensor badge */}
       <div style={{ marginTop: 8, marginLeft: 18, fontSize: 12, color: "#6b7280", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>

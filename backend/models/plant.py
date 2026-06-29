@@ -95,6 +95,7 @@ class PlantState(BaseModel):
     plant_id: str
     name: str
     species: str
+    room: Optional[str] = None  # e.g. "Living Room", "Bedroom"
 
     care_ranges: CareRanges
     # Where the care ranges came from
@@ -184,6 +185,12 @@ class HADevice(BaseModel):
 class CreatePlantRequest(BaseModel):
     name: str
     species: str
+    room: Optional[str] = None
+
+
+class UpdateRoomRequest(BaseModel):
+    """Request to move a plant to a different room (or clear its room assignment)."""
+    room: Optional[str] = None
 
 
 class UpdateCareRangesRequest(BaseModel):

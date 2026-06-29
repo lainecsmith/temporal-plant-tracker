@@ -35,10 +35,10 @@ export const api = {
   getPlant: (plantId: string): Promise<PlantState> =>
     request(`/plants/${plantId}`),
 
-  createPlant: (name: string, species: string): Promise<PlantState> =>
+  createPlant: (name: string, species: string, room?: string | null): Promise<PlantState> =>
     request("/plants", {
       method: "POST",
-      body: JSON.stringify({ name, species }),
+      body: JSON.stringify({ name, species, room: room ?? null }),
     }),
 
   updateCareRanges: (
@@ -87,6 +87,13 @@ export const api = {
     request(`/plants/${plantId}/status`, {
       method: "POST",
       body: JSON.stringify({ status }),
+    }),
+
+  /** Move a plant to a room, or clear its room assignment (pass null to unassign) */
+  updateRoom: (plantId: string, room: string | null): Promise<PlantState> =>
+    request(`/plants/${plantId}/room`, {
+      method: "PUT",
+      body: JSON.stringify({ room }),
     }),
 
   // ---- Sensors / Devices --------------------------------------------------

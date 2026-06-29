@@ -47,6 +47,7 @@ class PlantWorkflowInput:
     plant_id: str
     name: str
     species: str
+    room: Optional[str] = None
 
 
 @dataclass
@@ -78,6 +79,8 @@ class PlantWorkflowContinuation:
     last_alert_error: Optional[str] = None
     # Watering tracking
     last_watered_at: Optional[str] = None  # ISO datetime string
+    # Room assignment
+    room: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +114,7 @@ class PlantWorkflow:
         self._plant_id: str = input.plant_id
         self._name: str = input.name
         self._species: str = input.species
+        self._room: Optional[str] = input.room if hasattr(input, "room") else None
 
         # -------------------------------------------------------------------
         # Care ranges — populated after OpenPlantbook/AI lookup
@@ -334,29 +338,11 @@ class PlantWorkflow:
             self._last_watered_at = workflow.now()
             workflow.logger.info(f"[{self._name}] Watering recorded (now)")
 
-        # Clear any stale overdue flag — _check_watering_overdue will re-add it
-        # if the new (possibly backdated) timestamp is still overdue.
-        self._out_of_range_fields = [
-            f for f in self._out_of_range_fields if f != "watering_overdue"
-        ]
-
-        # Re-evaluate the overdue state immediately with the new timestamp.
-        # Following the Entity Workflow pattern, the signal handler must leave the
-        # workflow in a fully consistent state — not rely on the next hourly loop
-        # tick to catch up. This mirrors how associate_device directly sets
-        # _sensor_entity_id rather than deferring to the polling loop.
-        if not self._has_sensor():
-            interval = (
-                self._care_ranges.watering_interval_days
-                if self._care_ranges is not None else None
-            )
-            if interval is not None:
-                # Let _check_watering_overdue set WARNING or OK as appropriate
-                self._check_watering_overdue()
-            else:
-                # No interval configured — logging a watering moves us to OK
-                if not self._out_of_range_fields and self._status not in TERMINAL_STATUSES:
-                    self._status = PlantStatus.OK
+        # Trigger an immediate loop iteration — _poll_sensor() and
+        # _check_watering_overdue() will both run, evaluating the new timestamp.
+        # This is the same mechanism as associate_device and refresh_readings:
+        # all three paths converge on _force_poll = True so behavior is consistent.
+        self._force_poll = True
 
     @workflow.update
     def set_plant_status(self, status: str) -> None:
@@ -391,6 +377,14 @@ class PlantWorkflow:
                 f"Unknown plant status {status!r}. Valid values: {valid}"
             )
 
+    @workflow.signal
+    def set_room(self, room: Optional[str]) -> None:
+        """Move the plant to a room, or clear its room assignment (room=None)."""
+        workflow.logger.info(
+            f"[{self._name}] Room set to {room!r}"
+        )
+        self._room = room
+
     # -----------------------------------------------------------------------
     # Query
     # -----------------------------------------------------------------------
@@ -402,6 +396,7 @@ class PlantWorkflow:
             plant_id=self._plant_id,
             name=self._name,
             species=self._species,
+            room=self._room,
             care_ranges=self._care_ranges or CareRanges(
                 soil_moisture_min=0, soil_moisture_max=100,
                 temperature_min=0, temperature_max=50,
@@ -771,6 +766,8 @@ class PlantWorkflow:
             last_sensor_read_error=self._last_sensor_read_error,
             last_care_ranges_fetch_error=self._last_care_ranges_fetch_error,
             last_alert_error=self._last_alert_error,
+            # Room assignment
+            room=self._room,
         )
 
 
