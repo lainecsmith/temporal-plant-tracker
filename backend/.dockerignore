@@ -1,0 +1,36 @@
+# Secrets — never bake into the image
+.env
+*.env
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# uv cache
+.uv/
+
+# Tests & dev tooling
+tests/
+scripts/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Build artifacts
+dist/
+build/

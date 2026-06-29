@@ -1,0 +1,36 @@
+services:
+
+  # ── FastAPI server ──────────────────────────────────────────────────────────
+  backend-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    # Secrets and config are injected at runtime from your local .env file.
+    # The file is never copied into the image — Docker reads it here only.
+    env_file: ./backend/.env
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  # ── Temporal worker ─────────────────────────────────────────────────────────
+  # Reuses the same image as backend-api; only the entrypoint differs.
+  backend-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["uv", "run", "python", "worker.py"]
+    env_file: ./backend/.env
+    restart: unless-stopped
+    depends_on:
+      - backend-api
+
+  # ── React frontend (nginx) ──────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+    depends_on:
+      - backend-api
