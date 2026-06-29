@@ -75,6 +75,13 @@ export const api = {
   refreshReadings: (plantId: string): Promise<PlantState> =>
     request(`/plants/${plantId}/refresh`, { method: "POST" }),
 
+  /** Record that a plant was watered. Pass a Date to backfill; omit for right now. */
+  logWatering: (plantId: string, wateredAt?: Date): Promise<PlantState> =>
+    request(`/plants/${plantId}/water`, {
+      method: "POST",
+      body: wateredAt ? JSON.stringify({ watered_at: wateredAt.toISOString() }) : undefined,
+    }),
+
   /** Update the lifecycle status of a plant (e.g. "dead", "given_away") */
   updateStatus: (plantId: string, status: PlantStatus): Promise<PlantState> =>
     request(`/plants/${plantId}/status`, {

@@ -7,6 +7,8 @@ export interface CareRanges {
   air_humidity_max: number;
   light_lux_min: number | null;
   light_lux_max: number | null;
+  /** Typical number of days between waterings (null = not configured) */
+  watering_interval_days: number | null;
 }
 
 export interface SensorReadings {
@@ -41,6 +43,8 @@ export interface PlantState {
   status: PlantStatus;
   created_at: string;
   last_checked_at: string | null;
+  /** ISO datetime string of the last time the plant was watered (null = never recorded) */
+  last_watered_at: string | null;
 
   /**
    * Last-error fields — desired-vs-applied pattern.

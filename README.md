@@ -56,7 +56,7 @@ Each plant workflow lifecycle:
 ### 1. Clone / navigate to the project
 
 ```bash
-cd plant-tracker
+cd temporal-plant-tracker
 ```
 
 ### 2. Configure environment variables
@@ -97,7 +97,7 @@ cd backend
 uv sync
 ```
 
-### 4. Install frontend dependencies (already done)
+### 4. Install frontend dependencies
 
 ```bash
 cd frontend

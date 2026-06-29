@@ -56,6 +56,9 @@ async def get_care_ranges_from_ai(species: str) -> CareRangesWithReasoning:
         "  soil_moisture_max is the level reached immediately after a thorough "
         "  watering. Do not return a range that represents a 'comfortable steady "
         "  state' — return the actual min/max that the watering cycle produces. "
+        "For watering_interval_days: estimate the typical number of days between waterings "
+        "for this species under normal indoor conditions. For example, cacti and succulents "
+        "may be 14-30 days, tropical plants 7-10 days, and moisture-loving plants 3-5 days. "
         "If you are uncertain of a value, provide a reasonable typical range for the species. "
         "For each metric, also include a brief plain-English explanation (1-2 sentences) "
         "of why you chose that range for the given species — covering its natural habitat "
@@ -65,7 +68,7 @@ async def get_care_ranges_from_ai(species: str) -> CareRangesWithReasoning:
     user_prompt = (
         f"Provide the ideal care ranges for the following plant: {species}\n\n"
         "Include: soil moisture range (%), temperature range (°C), "
-        "air humidity range (%), and light level range (lux)."
+        "air humidity range (%), light level range (lux), and watering interval (days between waterings)."
     )
 
     try:

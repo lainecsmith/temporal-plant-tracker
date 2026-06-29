@@ -1,5 +1,5 @@
 import React, { useRef, useState } from "react";
-import { Droplets, Thermometer, Wind, Sun, RefreshCw, ChevronDown, ChevronUp, MoreHorizontal } from "lucide-react";
+import { Droplets, Thermometer, Wind, Sun, RefreshCw, ChevronDown, ChevronUp, MoreHorizontal, Droplet } from "lucide-react";
 import type { PlantState, CareRanges, PlantStatus } from "../types";
 import { TERMINAL_STATUSES } from "../types";
 import { CareRangesEditor } from "./CareRangesEditor";
@@ -23,7 +23,7 @@ const STATUS_COLORS: Record<string, { bg: string; border: string; dot: string }>
 const STATUS_LABELS: Record<string, string> = {
   ok:         "Healthy",
   warning:    "Needs Attention",
-  unknown:    "No Sensor",
+  unknown:    "Not Tracked",
   dead:       "Dead",
   given_away: "Given Away",
 };
@@ -113,6 +113,10 @@ function MetricBar({
 export function PlantCard({ plant, onUpdate, onRemove }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [loggingWater, setLoggingWater] = useState(false);
+  const [waterPickerOpen, setWaterPickerOpen] = useState(false);
+  /** ISO date string "YYYY-MM-DD" used by the date input */
+  const [waterPickerDate, setWaterPickerDate] = useState<string>("");
   const [showSensorModal, setShowSensorModal] = useState(false);
   const [showStatusMenu, setShowStatusMenu] = useState(false);
   const [changingStatus, setChangingStatus] = useState(false);
@@ -164,9 +168,56 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
     }
   }
 
+  /** Returns today as "YYYY-MM-DD" in the user's local timezone */
+  function todayLocalISO(): string {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
+
+  function openWaterPicker() {
+    setWaterPickerDate(todayLocalISO());
+    setWaterPickerOpen(true);
+  }
+
+  function cancelWaterPicker() {
+    setWaterPickerOpen(false);
+    setWaterPickerDate("");
+  }
+
+  async function confirmLogWatering() {
+    setLoggingWater(true);
+    try {
+      // Treat the date as noon local time to avoid UTC-rollback issues
+      const date = waterPickerDate
+        ? new Date(`${waterPickerDate}T12:00:00`)
+        : new Date();
+      const updated = await api.logWatering(plant.plant_id, date);
+      onUpdate(updated);
+      setWaterPickerOpen(false);
+      setWaterPickerDate("");
+    } catch (e) {
+      console.error(e);
+      alert("Failed to log watering. Please try again.");
+    } finally {
+      setLoggingWater(false);
+    }
+  }
+
   const lastChecked = plant.last_checked_at
     ? new Date(plant.last_checked_at).toLocaleString()
     : "Never";
+
+  /** Format how many days ago a datetime string was */
+  function daysAgo(isoString: string): string {
+    const diffMs = Date.now() - new Date(isoString).getTime();
+    const days = diffMs / (1000 * 60 * 60 * 24);
+    if (days < 1) return "today";
+    if (days < 2) return "yesterday";
+    return `${Math.floor(days)} days ago`;
+  }
+
+  const hasSensor = !!(plant.sensor_device_id || plant.sensor_entity_id);
+  const wateringOverdue = plant.out_of_range_fields.includes("watering_overdue");
 
   return (
     <div
@@ -193,9 +244,6 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
               }}
             />
             <span style={{ fontWeight: 700, fontSize: 16, color: "#111827" }}>{plant.name}</span>
-            <span style={{ fontSize: 12, background: "#e5e7eb", borderRadius: 99, padding: "2px 8px", color: "#6b7280" }}>
-              {STATUS_LABELS[plant.status]}
-            </span>
           </div>
           <div style={{ fontSize: 13, color: "#6b7280", marginTop: 2, marginLeft: 18 }}>
             <em>{plant.species}</em>
@@ -382,6 +430,111 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
                 </span>
               </div>
             ))}
+        </div>
+      )}
+
+      {/* Watering row */}
+      {(plant.care_ranges.watering_interval_days !== null || plant.last_watered_at || wateringOverdue || !hasSensor) && (
+        <div style={{ marginTop: 8, marginLeft: 18, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12 }}>
+          <Droplet size={13} style={{ color: "#2563eb", flexShrink: 0 }} />
+          <span style={{ color: "#374151" }}>
+            {plant.last_watered_at
+              ? <>Last watered: <strong>{daysAgo(plant.last_watered_at)}</strong></>
+              : <span style={{ color: "#9ca3af" }}>Watering never logged</span>}
+          </span>
+          {plant.care_ranges.watering_interval_days !== null && (
+            <span style={{ color: "#9ca3af" }}>
+              · every {plant.care_ranges.watering_interval_days} days
+            </span>
+          )}
+          {wateringOverdue && (
+            <span
+              style={{
+                background: "#fef3c7",
+                border: "1px solid #fcd34d",
+                borderRadius: 99,
+                padding: "1px 8px",
+                color: "#92400e",
+                fontWeight: 600,
+                fontSize: 11,
+              }}
+            >
+              ⚠️ Watering overdue
+            </span>
+          )}
+          {!hasSensor && !waterPickerOpen && (
+            <button
+              onClick={openWaterPicker}
+              style={{
+                border: "1px solid #93c5fd",
+                borderRadius: 6,
+                padding: "2px 10px",
+                background: "#dbeafe",
+                cursor: "pointer",
+                fontSize: 12,
+                color: "#1d4ed8",
+                fontWeight: 500,
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+              }}
+            >
+              <Droplet size={11} />
+              Log Watering
+            </button>
+          )}
+          {!hasSensor && waterPickerOpen && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              <input
+                type="date"
+                value={waterPickerDate}
+                max={todayLocalISO()}
+                onChange={(e) => setWaterPickerDate(e.target.value)}
+                disabled={loggingWater}
+                style={{
+                  border: "1px solid #93c5fd",
+                  borderRadius: 6,
+                  padding: "2px 6px",
+                  fontSize: 12,
+                  color: "#1d4ed8",
+                  background: "#f0f9ff",
+                  cursor: "text",
+                }}
+              />
+              <button
+                onClick={confirmLogWatering}
+                disabled={loggingWater || !waterPickerDate || waterPickerDate > todayLocalISO()}
+                style={{
+                  border: "none",
+                  borderRadius: 6,
+                  padding: "2px 10px",
+                  background: loggingWater ? "#86efac" : "#16a34a",
+                  cursor: loggingWater || !waterPickerDate ? "not-allowed" : "pointer",
+                  fontSize: 12,
+                  color: "#fff",
+                  fontWeight: 500,
+                  opacity: loggingWater ? 0.7 : 1,
+                }}
+              >
+                {loggingWater ? "Saving…" : "✓ Confirm"}
+              </button>
+              <button
+                onClick={cancelWaterPicker}
+                disabled={loggingWater}
+                style={{
+                  border: "1px solid #d1d5db",
+                  borderRadius: 6,
+                  padding: "2px 8px",
+                  background: "#fff",
+                  cursor: loggingWater ? "not-allowed" : "pointer",
+                  fontSize: 12,
+                  color: "#6b7280",
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          )}
         </div>
       )}
 

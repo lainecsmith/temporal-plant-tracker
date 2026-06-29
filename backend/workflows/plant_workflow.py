@@ -4,10 +4,16 @@ PlantWorkflow — Entity workflow representing a single plant.
 Each plant is a long-running Temporal workflow with ID "plant-{plant_id}".
 The workflow:
   1. Fetches care ranges from OpenPlantbook (or AI as fallback) on creation.
-  2. Waits for the user to associate a Zigbee sensor device via signal.
-  3. Polls the sensor hourly, compares readings to care ranges, and triggers
-     Home Assistant alerts when readings are out of range.
-  4. Uses continue-as-new to prevent unbounded history growth.
+  2. Enters the hourly polling loop immediately (no longer blocks on sensor
+     association — sensorless plants benefit from watering-overdue checks).
+  3. Polls the sensor hourly when a sensor is associated, compares readings to
+     care ranges, and triggers Home Assistant alerts when readings are out of range.
+  4. Tracks the last-watered timestamp: auto-detected via 40-point soil-moisture
+     spike for sensor plants; manually recorded via the record_watering signal
+     for sensorless plants.
+  5. For sensorless plants with a watering interval configured, flags status as
+     WARNING and adds "watering_overdue" to out_of_range_fields when overdue.
+  6. Uses continue-as-new to prevent unbounded history growth.
 """
 
 import asyncio
@@ -70,6 +76,8 @@ class PlantWorkflowContinuation:
     last_sensor_read_error: Optional[str] = None
     last_care_ranges_fetch_error: Optional[str] = None
     last_alert_error: Optional[str] = None
+    # Watering tracking
+    last_watered_at: Optional[str] = None  # ISO datetime string
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +85,10 @@ class PlantWorkflowContinuation:
 # ---------------------------------------------------------------------------
 
 POLL_INTERVAL = timedelta(hours=1)
+
+# Minimum soil-moisture increase (percentage points) to auto-detect a watering
+# event. Only fires when the previous reading was below soil_moisture_min.
+WATERING_SPIKE_THRESHOLD = 40.0
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +141,7 @@ class PlantWorkflow:
         # -------------------------------------------------------------------
         self._created_at: datetime = workflow.now()
         self._last_checked_at: Optional[datetime] = None
+        self._last_watered_at: Optional[datetime] = None
 
         # -------------------------------------------------------------------
         # Restore state when resuming via continue-as-new
@@ -153,6 +166,11 @@ class PlantWorkflow:
             if input.last_checked_at:
                 try:
                     self._last_checked_at = datetime.fromisoformat(input.last_checked_at)
+                except (ValueError, TypeError):
+                    pass
+            if input.last_watered_at:
+                try:
+                    self._last_watered_at = datetime.fromisoformat(input.last_watered_at)
                 except (ValueError, TypeError):
                     pass
 
@@ -283,6 +301,43 @@ class PlantWorkflow:
         workflow.logger.info(f"[{self._name}] Immediate refresh requested")
         self._force_poll = True
 
+    @workflow.signal
+    def record_watering(self, watered_at_iso: Optional[str] = None) -> None:
+        """
+        Manually record that the plant was watered.
+
+        watered_at_iso — optional ISO-8601 datetime string for the watering time.
+        If omitted, defaults to the current workflow time (i.e. right now).
+
+        For sensor plants this is normally auto-detected from a moisture spike,
+        but this signal also works as a manual override or backfill.
+        Clears any 'watering_overdue' warning immediately and updates status.
+        """
+        if watered_at_iso:
+            try:
+                self._last_watered_at = datetime.fromisoformat(watered_at_iso)
+                workflow.logger.info(
+                    f"[{self._name}] Watering recorded for {watered_at_iso}"
+                )
+            except (ValueError, TypeError):
+                workflow.logger.warning(
+                    f"[{self._name}] Invalid watered_at_iso {watered_at_iso!r} — using now"
+                )
+                self._last_watered_at = workflow.now()
+        else:
+            self._last_watered_at = workflow.now()
+            workflow.logger.info(f"[{self._name}] Watering recorded (now)")
+
+        # Clear the overdue flag immediately
+        self._out_of_range_fields = [
+            f for f in self._out_of_range_fields if f != "watering_overdue"
+        ]
+        # Update status: move to OK from any non-terminal status when no issues remain.
+        # This handles the common case where a sensorless plant starts at UNKNOWN
+        # and transitions to OK after its first watering is logged.
+        if not self._out_of_range_fields and self._status not in TERMINAL_STATUSES:
+            self._status = PlantStatus.OK
+
     @workflow.update
     def set_plant_status(self, status: str) -> None:
         """
@@ -343,6 +398,7 @@ class PlantWorkflow:
             status=self._status,
             created_at=self._created_at,
             last_checked_at=self._last_checked_at,
+            last_watered_at=self._last_watered_at,
             # Last-error fields — desired-vs-applied pattern
             last_association_error=self._last_association_error,
             last_sensor_read_error=self._last_sensor_read_error,
@@ -363,31 +419,12 @@ class PlantWorkflow:
             await self._fetch_care_ranges()
 
         # -------------------------------------------------------------------
-        # Phase 2: Wait until sensor is associated
-        # (May already be set if resuming via continue-as-new)
-        # -------------------------------------------------------------------
-        if not self._has_sensor():
-            workflow.logger.info(
-                f"[{self._name}] Waiting for sensor association..."
-            )
-            await workflow.wait_condition(
-                lambda: self._has_sensor() or self._stop_requested
-            )
-            if self._stop_requested:
-                workflow.logger.info(
-                    f"[{self._name}] Terminal status received while awaiting sensor — exiting"
-                )
-                return
-            workflow.logger.info(
-                f"[{self._name}] Sensor associated: device={self._sensor_device_id!r} "
-                f"entity={self._sensor_entity_id!r}"
-            )
-
-        # -------------------------------------------------------------------
-        # Phase 3: Hourly polling loop
+        # Phase 2: Hourly polling loop
+        # All plants enter the loop immediately — sensorless plants skip the
+        # sensor read but still receive watering-overdue checks.
         # -------------------------------------------------------------------
         workflow.logger.info(
-            f"[{self._name}] Starting hourly sensor polling loop"
+            f"[{self._name}] Starting hourly polling loop"
         )
 
         while True:
@@ -407,8 +444,11 @@ class PlantWorkflow:
                     args=[self._build_continuation()],
                 )
 
-            # Poll the sensor
+            # Poll the sensor (no-op if no sensor is associated)
             await self._poll_sensor()
+
+            # For sensorless plants: check if watering is overdue
+            self._check_watering_overdue()
 
             # Sleep for 1 hour, but allow refresh_readings or stop signal to wake us early
             self._force_poll = False
@@ -486,6 +526,10 @@ class PlantWorkflow:
                     "air_humidity_reasoning": ai_ranges.air_humidity_reasoning,
                     "light_lux_reasoning": ai_ranges.light_lux_reasoning,
                 }
+                if ai_ranges.watering_interval_reasoning:
+                    self._care_ranges_reasoning["watering_interval_reasoning"] = (
+                        ai_ranges.watering_interval_reasoning
+                    )
                 # AI returns temperatures in Celsius — convert to Fahrenheit
                 self._care_ranges = _convert_care_ranges_temp_to_f(ai_ranges)
                 self._care_ranges_source = "ai"
@@ -506,7 +550,12 @@ class PlantWorkflow:
             self._ranges_already_fetched = True
 
     async def _poll_sensor(self) -> None:
-        """Read sensor, compare to care ranges, trigger alerts if needed."""
+        """Read sensor, compare to care ranges, trigger alerts if needed.
+
+        Also auto-detects watering events: if the previous soil moisture reading
+        was below soil_moisture_min AND the new reading jumped by at least
+        WATERING_SPIKE_THRESHOLD percentage points, records a watering event.
+        """
         if not self._has_sensor() or self._care_ranges is None:
             return
 
@@ -538,6 +587,31 @@ class PlantWorkflow:
             workflow.logger.error(f"[{self._name}] {err}")
             self._last_sensor_read_error = err
             return
+
+        # -------------------------------------------------------------------
+        # Auto-detect watering from a significant moisture spike.
+        # Condition: previous reading was below soil_moisture_min AND the
+        # new reading jumped by >= WATERING_SPIKE_THRESHOLD percentage points.
+        # -------------------------------------------------------------------
+        prev_moisture = (
+            self._last_readings.soil_moisture
+            if self._last_readings is not None
+            else None
+        )
+        new_moisture = readings.soil_moisture
+
+        if (
+            prev_moisture is not None
+            and new_moisture is not None
+            and prev_moisture < self._care_ranges.soil_moisture_min
+            and (new_moisture - prev_moisture) >= WATERING_SPIKE_THRESHOLD
+        ):
+            workflow.logger.info(
+                f"[{self._name}] Watering detected: moisture jumped "
+                f"{prev_moisture:.1f}% → {new_moisture:.1f}% "
+                f"(spike: {new_moisture - prev_moisture:.1f}pp)"
+            )
+            self._last_watered_at = workflow.now()
 
         self._last_readings = readings
         self._last_checked_at = workflow.now()
@@ -592,6 +666,63 @@ class PlantWorkflow:
                     workflow.logger.error(f"[{self._name}] {err}")
                     self._last_alert_error = err
 
+    def _check_watering_overdue(self) -> None:
+        """
+        For plants without a sensor: check if watering is overdue based on
+        last_watered_at and care_ranges.watering_interval_days.
+
+        Sets status to WARNING and adds "watering_overdue" to out_of_range_fields
+        when the interval has been exceeded; clears both when watered.
+
+        No-op when:
+          - The plant has a sensor (sensor tracks moisture directly)
+          - watering_interval_days is not configured
+          - last_watered_at has never been recorded
+        """
+        # Sensor plants manage their own status via _poll_sensor
+        if self._has_sensor():
+            return
+
+        interval = (
+            self._care_ranges.watering_interval_days
+            if self._care_ranges is not None
+            else None
+        )
+
+        if interval is None or self._last_watered_at is None:
+            # Can't evaluate — ensure "watering_overdue" is absent
+            if "watering_overdue" in self._out_of_range_fields:
+                self._out_of_range_fields = [
+                    f for f in self._out_of_range_fields if f != "watering_overdue"
+                ]
+            return
+
+        days_since_watered = (
+            (workflow.now() - self._last_watered_at).total_seconds() / 86400
+        )
+
+        if days_since_watered > interval:
+            if "watering_overdue" not in self._out_of_range_fields:
+                self._out_of_range_fields = self._out_of_range_fields + ["watering_overdue"]
+                workflow.logger.warning(
+                    f"[{self._name}] Watering overdue: "
+                    f"{days_since_watered:.1f} days since last watered "
+                    f"(interval: {interval} days)"
+                )
+            if self._status not in TERMINAL_STATUSES:
+                self._status = PlantStatus.WARNING
+        else:
+            if "watering_overdue" in self._out_of_range_fields:
+                self._out_of_range_fields = [
+                    f for f in self._out_of_range_fields if f != "watering_overdue"
+                ]
+                workflow.logger.info(f"[{self._name}] Watering is up to date")
+            # Move to OK from any non-terminal status when no issues remain.
+            # This covers the transition from UNKNOWN → OK when a sensorless
+            # plant has a configured interval and a recent watering recorded.
+            if not self._out_of_range_fields and self._status not in TERMINAL_STATUSES:
+                self._status = PlantStatus.OK
+
     def _build_continuation(self) -> "PlantWorkflowContinuation":
         return PlantWorkflowContinuation(
             plant_id=self._plant_id,
@@ -610,6 +741,9 @@ class PlantWorkflow:
             created_at=self._created_at.isoformat(),
             last_checked_at=(
                 self._last_checked_at.isoformat() if self._last_checked_at else None
+            ),
+            last_watered_at=(
+                self._last_watered_at.isoformat() if self._last_watered_at else None
             ),
             ranges_already_fetched=True,
             # Persist last-error state across continue-as-new

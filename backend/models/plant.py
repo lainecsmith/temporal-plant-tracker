@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -26,6 +26,9 @@ class CareRanges(BaseModel):
     light_lux_max: Optional[float] = Field(
         default=None, description="Maximum light level (lux)"
     )
+    watering_interval_days: Optional[float] = Field(
+        default=None, description="Typical number of days between waterings"
+    )
 
 
 class CareRangesWithReasoning(CareRanges):
@@ -42,6 +45,10 @@ class CareRangesWithReasoning(CareRanges):
     )
     light_lux_reasoning: str = Field(
         description="Why this light level range was chosen for this species"
+    )
+    watering_interval_reasoning: Optional[str] = Field(
+        default=None,
+        description="Why this watering interval was chosen for this species"
     )
 
 
@@ -109,6 +116,7 @@ class PlantState(BaseModel):
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_checked_at: Optional[datetime] = None
+    last_watered_at: Optional[datetime] = None
 
     # ---------------------------------------------------------------------------
     # Last-error fields — desired-vs-applied pattern.
@@ -197,3 +205,18 @@ class AssociateDeviceRequest(BaseModel):
 class UpdatePlantStatusRequest(BaseModel):
     """Request to change a plant's lifecycle status."""
     status: PlantStatus
+
+
+class LogWateringRequest(BaseModel):
+    """Request to record a watering event. watered_at defaults to now if omitted."""
+    watered_at: Optional[datetime] = Field(
+        default=None,
+        description="When the plant was watered. Defaults to the current time if not provided.",
+    )
+
+    @field_validator("watered_at")
+    @classmethod
+    def must_not_be_future(cls, v: Optional[datetime]) -> Optional[datetime]:
+        if v is not None and v > datetime.utcnow():
+            raise ValueError("watered_at cannot be in the future")
+        return v

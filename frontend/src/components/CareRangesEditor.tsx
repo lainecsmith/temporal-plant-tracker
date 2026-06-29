@@ -102,6 +102,81 @@ function RangeRow({ label, unit, minKey, maxKey, ranges, readOnly, reasoning, on
   );
 }
 
+interface WateringIntervalRowProps {
+  value: number | null;
+  readOnly: boolean;
+  reasoning?: string;
+  onChange: (value: number | null) => void;
+}
+
+function WateringIntervalRow({ value, readOnly, reasoning, onChange }: WateringIntervalRowProps) {
+  const [tooltipVisible, setTooltipVisible] = useState(false);
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+      <div style={{ width: 130, display: "flex", alignItems: "center", gap: 4 }}>
+        <span style={{ fontSize: 14, color: "#374151" }}>Watering</span>
+        {reasoning && (
+          <span
+            onMouseEnter={() => setTooltipVisible(true)}
+            onMouseLeave={() => setTooltipVisible(false)}
+            style={{ position: "relative", cursor: "help", lineHeight: 1 }}
+          >
+            <span style={{ fontSize: 12, color: "#60a5fa", fontWeight: 700, userSelect: "none" }}>ⓘ</span>
+            {tooltipVisible && (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: "calc(100% + 6px)",
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  zIndex: 50,
+                  background: "#1e293b",
+                  color: "#f1f5f9",
+                  padding: "8px 11px",
+                  borderRadius: 8,
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                  width: 240,
+                  whiteSpace: "normal",
+                  boxShadow: "0 4px 16px rgba(0,0,0,0.25)",
+                  pointerEvents: "none",
+                }}
+              >
+                <div
+                  style={{
+                    position: "absolute",
+                    top: "100%",
+                    left: "50%",
+                    transform: "translateX(-50%)",
+                    width: 0,
+                    height: 0,
+                    borderLeft: "6px solid transparent",
+                    borderRight: "6px solid transparent",
+                    borderTop: "6px solid #1e293b",
+                  }}
+                />
+                {reasoning}
+              </div>
+            )}
+          </span>
+        )}
+      </div>
+      <input
+        type="number"
+        value={value ?? ""}
+        disabled={readOnly}
+        min={1}
+        step={1}
+        onChange={(e) => onChange(e.target.value === "" ? null : parseFloat(e.target.value))}
+        placeholder="—"
+        style={{ ...inputStyle(readOnly), width: 80 }}
+      />
+      <span style={{ fontSize: 13, color: "#6b7280" }}>days between waterings</span>
+    </div>
+  );
+}
+
 function inputStyle(disabled: boolean): React.CSSProperties {
   return {
     width: 80,
@@ -179,6 +254,12 @@ export function CareRangesEditor({ ranges, source, reasoning, onChange, readOnly
       <RangeRow label="Temperature" unit="°F" minKey="temperature_min" maxKey="temperature_max" ranges={local} readOnly={isReadOnly} reasoning={reasoning?.temperature_reasoning} onChange={handleChange} />
       <RangeRow label="Air Humidity" unit="%" minKey="air_humidity_min" maxKey="air_humidity_max" ranges={local} readOnly={isReadOnly} reasoning={reasoning?.air_humidity_reasoning} onChange={handleChange} />
       <RangeRow label="Light" unit="lux" minKey="light_lux_min" maxKey="light_lux_max" ranges={local} readOnly={isReadOnly} reasoning={reasoning?.light_lux_reasoning} onChange={handleChange} />
+      <WateringIntervalRow
+        value={local.watering_interval_days}
+        readOnly={isReadOnly}
+        reasoning={reasoning?.watering_interval_reasoning}
+        onChange={(v) => handleChange("watering_interval_days", v)}
+      />
 
       {editing && (
         <div style={{ marginTop: 12 }}>

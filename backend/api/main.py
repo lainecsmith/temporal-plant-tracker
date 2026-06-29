@@ -23,6 +23,7 @@ from models.plant import (
     HADevice,
     HADeviceEntity,
     HASensor,
+    LogWateringRequest,
     PlantState,
     TERMINAL_STATUSES,
     UpdateCareRangesRequest,
@@ -237,6 +238,34 @@ async def associate_device(plant_id: str, body: AssociateDeviceRequest):
             args=[body.device_id, body.device_name, body.sensor_entities],
         )
         import asyncio
+        await asyncio.sleep(0.3)
+        state: PlantState = await handle.query(PlantWorkflow.get_state)
+        return state
+    except RPCError as e:
+        if e.status == RPCStatusCode.NOT_FOUND:
+            raise HTTPException(status_code=404, detail=f"Plant {plant_id!r} not found")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/plants/{plant_id}/water", response_model=PlantState)
+async def log_watering(plant_id: str, body: Optional[LogWateringRequest] = None):
+    """
+    Record that a plant was watered.
+
+    If body.watered_at is provided, that datetime is used; otherwise defaults
+    to the current time. Sends a record_watering signal to the workflow, which:
+    - Sets last_watered_at to the specified (or current) time
+    - Clears any 'watering_overdue' warning
+    - Transitions status to OK (from any non-terminal status) if no other issues
+    """
+    handle = await _get_plant_handle(plant_id)
+    try:
+        # Convert datetime to ISO string for the signal argument (None = use now)
+        watered_at_iso: Optional[str] = None
+        if body and body.watered_at:
+            watered_at_iso = body.watered_at.isoformat()
+
+        await handle.signal(PlantWorkflow.record_watering, watered_at_iso)
         await asyncio.sleep(0.3)
         state: PlantState = await handle.query(PlantWorkflow.get_state)
         return state
