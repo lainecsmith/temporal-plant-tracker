@@ -5,13 +5,15 @@ FastAPI application — the HTTP bridge between the React UI and Temporal workfl
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowUpdateFailedError
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -23,15 +25,19 @@ from models.plant import (
     HADevice,
     HADeviceEntity,
     HASensor,
+    LogWateringRequest,
     PlantState,
     TERMINAL_STATUSES,
     UpdateCareRangesRequest,
     UpdatePlantStatusRequest,
+    UpdateRoomRequest,
 )
 from workflows.plant_workflow import PlantWorkflow, PlantWorkflowInput
 
 with __import__("temporalio").workflow.unsafe.imports_passed_through():
     pass  # ensure sandbox pass-through is loaded
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -103,13 +109,33 @@ async def health():
 
 # ---- Plants ---------------------------------------------------------------
 
+
+def _slugify(text: str) -> str:
+    """
+    Convert a plant name into a workflow-ID-safe slug.
+
+    Rules:
+      - Lowercase
+      - Any run of characters that are not alphanumeric or hyphens → single hyphen
+      - Strip leading/trailing hyphens
+    """
+    slug = text.lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", slug)
+    slug = slug.strip("-")
+    return slug or "plant"
+
+
 @app.post("/plants", response_model=PlantState, status_code=status.HTTP_201_CREATED)
 async def create_plant(body: CreatePlantRequest):
     """
     Start a new PlantWorkflow. The workflow will immediately look up care
     ranges from OpenPlantbook (or AI) and wait for sensor association.
     """
-    plant_id = str(uuid.uuid4())
+    # Workflow ID format: plant-<slug>-<short-random>
+    # e.g. "Living Room Monstera" → plant-living-room-monstera-a1b2c3d4
+    slug = _slugify(body.name)
+    short_id = str(uuid.uuid4()).replace("-", "")[:8]
+    plant_id = f"{slug}-{short_id}"
     client = await get_temporal_client()
 
     await client.start_workflow(
@@ -118,6 +144,7 @@ async def create_plant(body: CreatePlantRequest):
             plant_id=plant_id,
             name=body.name,
             species=body.species,
+            room=body.room,
         ),
         id=f"plant-{plant_id}",
         task_queue=settings.temporal_task_queue,
@@ -158,17 +185,46 @@ async def list_plants():
     """
     client = await get_temporal_client()
 
+    from models.plant import CareRanges, PlantStatus
+
     plants: list[PlantState] = []
     async for workflow_exec in client.list_workflows(
-        f'WorkflowType = "PlantWorkflow" AND ExecutionStatus = "Running"'
+        'WorkflowType = "PlantWorkflow" AND ExecutionStatus = "Running"'
     ):
         handle = client.get_workflow_handle(workflow_exec.id)
         try:
             state: PlantState = await handle.query(PlantWorkflow.get_state)
             plants.append(state)
         except Exception as e:
-            # Skip workflows that can't be queried right now
-            continue
+            # Query failed (e.g. workflow is mid-replay, executing an activity,
+            # or in the middle of continue-as-new).  Log it and include a
+            # minimal fallback stub so the plant still appears in the UI
+            # rather than silently vanishing.
+            logger.warning(
+                "Could not query workflow %s — including fallback stub. Error: %s",
+                workflow_exec.id,
+                e,
+            )
+            # Workflow ID format is "plant-{plant_id}"
+            plant_id = workflow_exec.id.removeprefix("plant-")
+            plants.append(
+                PlantState(
+                    plant_id=plant_id,
+                    name=plant_id,  # best available without query
+                    species="",
+                    care_ranges=CareRanges(
+                        soil_moisture_min=0,
+                        soil_moisture_max=100,
+                        temperature_min=0,
+                        temperature_max=50,
+                        air_humidity_min=0,
+                        air_humidity_max=100,
+                    ),
+                    care_ranges_source="unknown",
+                    status=PlantStatus.UNKNOWN,
+                    created_at=workflow_exec.start_time,
+                )
+            )
 
     plants.sort(key=lambda p: p.created_at)
     return plants
@@ -189,15 +245,22 @@ async def get_plant(plant_id: str):
 
 @app.put("/plants/{plant_id}/care-ranges", response_model=PlantState)
 async def update_care_ranges(plant_id: str, body: UpdateCareRangesRequest):
-    """Send a signal to update the care ranges for a plant."""
+    """Update the care ranges for a plant with synchronous validation.
+
+    Uses a Temporal Update (not Signal) so that:
+    - The validator runs before any state mutation.
+    - Validation errors are returned synchronously to the caller.
+    - No sleep/polling hack is needed — execute_update blocks until processed.
+    """
     handle = await _get_plant_handle(plant_id)
     try:
-        await handle.signal(PlantWorkflow.update_care_ranges, body.care_ranges)
-        # Small wait to let the signal be processed, then re-query
-        import asyncio
-        await asyncio.sleep(0.3)
+        await handle.execute_update(PlantWorkflow.update_care_ranges, body.care_ranges)
         state: PlantState = await handle.query(PlantWorkflow.get_state)
         return state
+    except WorkflowUpdateFailedError as e:
+        # Validator raised — return the rejection reason as HTTP 422
+        detail = str(e.cause) if e.cause else str(e)
+        raise HTTPException(status_code=422, detail=detail)
     except RPCError as e:
         if e.status == RPCStatusCode.NOT_FOUND:
             raise HTTPException(status_code=404, detail=f"Plant {plant_id!r} not found")
@@ -210,8 +273,7 @@ async def associate_sensor(plant_id: str, body: AssociateSensorRequest):
     handle = await _get_plant_handle(plant_id)
     try:
         await handle.signal(PlantWorkflow.associate_sensor, body.sensor_entity_id)
-        import asyncio
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)
         state: PlantState = await handle.query(PlantWorkflow.get_state)
         return state
     except RPCError as e:
@@ -229,8 +291,35 @@ async def associate_device(plant_id: str, body: AssociateDeviceRequest):
             PlantWorkflow.associate_device,
             args=[body.device_id, body.device_name, body.sensor_entities],
         )
-        import asyncio
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)
+        state: PlantState = await handle.query(PlantWorkflow.get_state)
+        return state
+    except RPCError as e:
+        if e.status == RPCStatusCode.NOT_FOUND:
+            raise HTTPException(status_code=404, detail=f"Plant {plant_id!r} not found")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/plants/{plant_id}/water", response_model=PlantState)
+async def log_watering(plant_id: str, body: Optional[LogWateringRequest] = None):
+    """
+    Record that a plant was watered.
+
+    If body.watered_at is provided, that datetime is used; otherwise defaults
+    to the current time. Sends a record_watering signal to the workflow, which:
+    - Sets last_watered_at to the specified (or current) time
+    - Clears any 'watering_overdue' warning
+    - Transitions status to OK (from any non-terminal status) if no other issues
+    """
+    handle = await _get_plant_handle(plant_id)
+    try:
+        # Convert datetime to ISO string for the signal argument (None = use now)
+        watered_at_iso: Optional[str] = None
+        if body and body.watered_at:
+            watered_at_iso = body.watered_at.isoformat()
+
+        await handle.signal(PlantWorkflow.record_watering, watered_at_iso)
+        await asyncio.sleep(0.5)
         state: PlantState = await handle.query(PlantWorkflow.get_state)
         return state
     except RPCError as e:
@@ -258,27 +347,24 @@ async def refresh_plant(plant_id: str):
 @app.post("/plants/{plant_id}/status", response_model=PlantState)
 async def update_plant_status(plant_id: str, body: UpdatePlantStatusRequest):
     """
-    Change the lifecycle status of a plant.
+    Change the lifecycle status of a plant with synchronous validation.
 
-    Terminal statuses (e.g. 'dead', 'given_away') will signal the workflow to
-    exit cleanly. The last-known state is returned before the workflow completes.
-    Non-terminal statuses update the status in-place without ending the workflow.
+    Uses a Temporal Update (not Signal) so that unknown status strings are
+    rejected synchronously rather than silently dropped.
+    Terminal statuses (e.g. 'dead', 'given_away') cause the workflow to exit
+    cleanly; the last-known state is returned before it fully completes.
     """
     handle = await _get_plant_handle(plant_id)
     is_terminal = body.status in TERMINAL_STATUSES
     try:
-        await handle.signal(PlantWorkflow.set_plant_status, body.status.value)
+        await handle.execute_update(PlantWorkflow.set_plant_status, body.status.value)
 
-        # Give the workflow a moment to process the signal and update its state.
-        # For terminal statuses we wait a bit longer since the workflow exits.
-        await asyncio.sleep(0.5 if is_terminal else 0.3)
-
-        # After a terminal signal the workflow may have already completed, so
-        # querying it will fail. Return a best-effort state using what we know.
+        # For terminal statuses the workflow begins exiting immediately after the
+        # update is processed — the query may race with completion, so fall back
+        # gracefully if the workflow is already gone.
         if is_terminal:
             from models.plant import CareRanges
             from datetime import datetime
-            # Attempt a final query; fall back gracefully if the workflow is gone.
             try:
                 state: PlantState = await handle.query(PlantWorkflow.get_state)
             except Exception:
@@ -298,6 +384,25 @@ async def update_plant_status(plant_id: str, body: UpdatePlantStatusRequest):
             return state
 
         state = await handle.query(PlantWorkflow.get_state)
+        return state
+    except WorkflowUpdateFailedError as e:
+        # Validator rejected the status value — return the reason as HTTP 422
+        detail = str(e.cause) if e.cause else str(e)
+        raise HTTPException(status_code=422, detail=detail)
+    except RPCError as e:
+        if e.status == RPCStatusCode.NOT_FOUND:
+            raise HTTPException(status_code=404, detail=f"Plant {plant_id!r} not found")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/plants/{plant_id}/room", response_model=PlantState)
+async def update_room(plant_id: str, body: UpdateRoomRequest):
+    """Move a plant to a room, or clear its room (room=null)."""
+    handle = await _get_plant_handle(plant_id)
+    try:
+        await handle.signal(PlantWorkflow.set_room, body.room)
+        await asyncio.sleep(0.3)
+        state: PlantState = await handle.query(PlantWorkflow.get_state)
         return state
     except RPCError as e:
         if e.status == RPCStatusCode.NOT_FOUND:

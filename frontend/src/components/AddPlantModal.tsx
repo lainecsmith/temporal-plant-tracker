@@ -42,6 +42,7 @@ export function AddPlantModal({ onClose, onCreated }: Props) {
   const [step, setStep] = useState<Step>("name");
   const [name, setName] = useState("");
   const [species, setSpecies] = useState("");
+  const [room, setRoom] = useState("");
   const [plant, setPlant] = useState<PlantState | null>(null);
   const [devices, setDevices] = useState<HADevice[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
@@ -60,7 +61,7 @@ export function AddPlantModal({ onClose, onCreated }: Props) {
     setCreating(true);
     setError(null);
     try {
-      const created = await api.createPlant(name.trim(), species.trim());
+      const created = await api.createPlant(name.trim(), species.trim(), room.trim() || null);
       setPlant(created);
       setStep("ranges");
       // If ranges aren't loaded yet, poll until they are
@@ -272,6 +273,17 @@ export function AddPlantModal({ onClose, onCreated }: Props) {
               placeholder="e.g. Monstera deliciosa"
               value={species}
               onChange={(e) => setSpecies(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+            />
+
+            <label style={labelStyle}>
+              Room <span style={{ fontWeight: 400, color: "#9ca3af" }}>(optional)</span>
+            </label>
+            <input
+              style={fieldStyle}
+              placeholder="e.g. Living Room, Bedroom…"
+              value={room}
+              onChange={(e) => setRoom(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleCreate()}
             />
 

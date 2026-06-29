@@ -90,6 +90,27 @@ export default function App() {
   const okCount = plants.filter((p) => p.status === "ok").length;
   const unknownCount = plants.filter((p) => p.status === "unknown").length;
 
+  /**
+   * Group plants by room for display.
+   * Returns an ordered array of [roomName, plants[]] pairs.
+   * Named rooms are sorted alphabetically; unassigned plants go last.
+   */
+  const plantGroups: [string | null, PlantState[]][] = (() => {
+    const roomMap = new Map<string, PlantState[]>();
+    const unassigned: PlantState[] = [];
+    for (const plant of plants) {
+      if (plant.room) {
+        if (!roomMap.has(plant.room)) roomMap.set(plant.room, []);
+        roomMap.get(plant.room)!.push(plant);
+      } else {
+        unassigned.push(plant);
+      }
+    }
+    const sorted: [string | null, PlantState[]][] = [...roomMap.entries()].sort(([a], [b]) => a.localeCompare(b));
+    if (unassigned.length > 0) sorted.push([null, unassigned]);
+    return sorted;
+  })();
+
   return (
     <div style={{ minHeight: "100vh", background: "#f1f5f0", fontFamily: "system-ui, -apple-system, sans-serif" }}>
       {/* Header */}
@@ -230,20 +251,61 @@ export default function App() {
             </button>
           </div>
         ) : (
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(380px, 1fr))",
-              gap: 16,
-            }}
-          >
-            {plants.map((plant) => (
-              <PlantCard
-                key={plant.plant_id}
-                plant={plant}
-                onUpdate={handlePlantUpdate}
-                onRemove={handlePlantRemove}
-              />
+          <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
+            {plantGroups.map(([room, groupPlants]) => (
+              <section key={room ?? "__unassigned__"}>
+                {/* Always show a named room header; only show "Unassigned" when
+                    there are other named rooms so a fully-unassigned list stays clean */}
+                {(room !== null || plantGroups.length > 1) && (
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      marginBottom: 12,
+                    }}
+                  >
+                    <span style={{ fontSize: 16 }}>{room ? "🏠" : "📦"}</span>
+                    <h2
+                      style={{
+                        margin: 0,
+                        fontSize: 15,
+                        fontWeight: 700,
+                        color: "#374151",
+                        letterSpacing: "0.01em",
+                      }}
+                    >
+                      {room ?? "Unassigned"}
+                    </h2>
+                    <span
+                      style={{
+                        fontSize: 12,
+                        color: "#9ca3af",
+                        fontWeight: 400,
+                      }}
+                    >
+                      {groupPlants.length} plant{groupPlants.length !== 1 ? "s" : ""}
+                    </span>
+                    <div style={{ flex: 1, height: 1, background: "#e5e7eb", marginLeft: 4 }} />
+                  </div>
+                )}
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fill, minmax(380px, 1fr))",
+                    gap: 16,
+                  }}
+                >
+                  {groupPlants.map((plant) => (
+                    <PlantCard
+                      key={plant.plant_id}
+                      plant={plant}
+                      onUpdate={handlePlantUpdate}
+                      onRemove={handlePlantRemove}
+                    />
+                  ))}
+                </div>
+              </section>
             ))}
           </div>
         )}

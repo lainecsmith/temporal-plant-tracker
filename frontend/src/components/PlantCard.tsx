@@ -1,5 +1,5 @@
 import React, { useRef, useState } from "react";
-import { Droplets, Thermometer, Wind, Sun, RefreshCw, ChevronDown, ChevronUp, MoreHorizontal } from "lucide-react";
+import { Droplets, Thermometer, Wind, Sun, RefreshCw, ChevronDown, ChevronUp, MoreHorizontal, Droplet } from "lucide-react";
 import type { PlantState, CareRanges, PlantStatus } from "../types";
 import { TERMINAL_STATUSES } from "../types";
 import { CareRangesEditor } from "./CareRangesEditor";
@@ -23,7 +23,7 @@ const STATUS_COLORS: Record<string, { bg: string; border: string; dot: string }>
 const STATUS_LABELS: Record<string, string> = {
   ok:         "Healthy",
   warning:    "Needs Attention",
-  unknown:    "No Sensor",
+  unknown:    "Not Tracked",
   dead:       "Dead",
   given_away: "Given Away",
 };
@@ -113,10 +113,16 @@ function MetricBar({
 export function PlantCard({ plant, onUpdate, onRemove }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [savingRanges, setSavingRanges] = useState(false);
+  const [loggingWater, setLoggingWater] = useState(false);
+  const [waterPickerOpen, setWaterPickerOpen] = useState(false);
+  /** ISO date string "YYYY-MM-DD" used by the date input */
+  const [waterPickerDate, setWaterPickerDate] = useState<string>("");
   const [showSensorModal, setShowSensorModal] = useState(false);
   const [showStatusMenu, setShowStatusMenu] = useState(false);
   const [changingStatus, setChangingStatus] = useState(false);
+  const [showRoomInput, setShowRoomInput] = useState(false);
+  const [roomDraft, setRoomDraft] = useState("");
+  const [savingRoom, setSavingRoom] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const colors = STATUS_COLORS[plant.status] ?? STATUS_COLORS.unknown;
   const r = plant.last_readings;
@@ -134,15 +140,29 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
     }
   }
 
-  async function handleRangesChange(ranges: CareRanges) {
-    setSavingRanges(true);
+  async function handleRangesChange(ranges: CareRanges): Promise<void> {
+    // Let errors propagate to CareRangesEditor so it can show them inline.
+    const updated = await api.updateCareRanges(plant.plant_id, ranges);
+    onUpdate(updated);
+  }
+
+  function openRoomInput() {
+    setRoomDraft(plant.room ?? "");
+    setShowStatusMenu(false);
+    setShowRoomInput(true);
+  }
+
+  async function handleSaveRoom() {
+    setSavingRoom(true);
     try {
-      const updated = await api.updateCareRanges(plant.plant_id, ranges);
+      const updated = await api.updateRoom(plant.plant_id, roomDraft.trim() || null);
       onUpdate(updated);
+      setShowRoomInput(false);
     } catch (e) {
       console.error(e);
+      alert("Failed to update room. Please try again.");
     } finally {
-      setSavingRanges(false);
+      setSavingRoom(false);
     }
   }
 
@@ -171,9 +191,58 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
     }
   }
 
+  /** Returns today as "YYYY-MM-DD" in the user's local timezone */
+  function todayLocalISO(): string {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
+
+  function openWaterPicker() {
+    setWaterPickerDate(todayLocalISO());
+    setWaterPickerOpen(true);
+  }
+
+  function cancelWaterPicker() {
+    setWaterPickerOpen(false);
+    setWaterPickerDate("");
+  }
+
+  async function confirmLogWatering() {
+    setLoggingWater(true);
+    try {
+      // For today: use the current time (always valid, never in the future).
+      // For a past date: midnight UTC is fine — it's unambiguously in the past.
+      const today = todayLocalISO();
+      const date = waterPickerDate && waterPickerDate < today
+        ? new Date(waterPickerDate)   // past date — midnight UTC
+        : new Date();                  // today — right now
+      const updated = await api.logWatering(plant.plant_id, date);
+      onUpdate(updated);
+      setWaterPickerOpen(false);
+      setWaterPickerDate("");
+    } catch (e) {
+      console.error(e);
+      alert("Failed to log watering. Please try again.");
+    } finally {
+      setLoggingWater(false);
+    }
+  }
+
   const lastChecked = plant.last_checked_at
     ? new Date(plant.last_checked_at).toLocaleString()
     : "Never";
+
+  /** Format how many days ago a datetime string was */
+  function daysAgo(isoString: string): string {
+    const diffMs = Date.now() - new Date(isoString).getTime();
+    const days = diffMs / (1000 * 60 * 60 * 24);
+    if (days < 1) return "today";
+    if (days < 2) return "yesterday";
+    return `${Math.floor(days)} days ago`;
+  }
+
+  const hasSensor = !!(plant.sensor_device_id || plant.sensor_entity_id);
+  const wateringOverdue = plant.out_of_range_fields.includes("watering_overdue");
 
   return (
     <div
@@ -200,9 +269,6 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
               }}
             />
             <span style={{ fontWeight: 700, fontSize: 16, color: "#111827" }}>{plant.name}</span>
-            <span style={{ fontSize: 12, background: "#e5e7eb", borderRadius: 99, padding: "2px 8px", color: "#6b7280" }}>
-              {STATUS_LABELS[plant.status]}
-            </span>
           </div>
           <div style={{ fontSize: 13, color: "#6b7280", marginTop: 2, marginLeft: 18 }}>
             <em>{plant.species}</em>
@@ -295,6 +361,28 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
                     <span>{opt.label}</span>
                   </button>
                 ))}
+                <div style={{ height: 1, background: "#f3f4f6", margin: "4px 0" }} />
+                <button
+                  onClick={openRoomInput}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    width: "100%",
+                    padding: "8px 12px",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontSize: 13,
+                    color: "#374151",
+                    textAlign: "left",
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = "#f9fafb")}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+                >
+                  <span>🏠</span>
+                  <span>{plant.room ? "Move to Room…" : "Assign to Room…"}</span>
+                </button>
               </div>
             )}
           </div>
@@ -317,6 +405,65 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
           </button>
         </div>
       </div>
+
+      {/* Room badge / inline editor */}
+      {showRoomInput ? (
+        <div style={{ marginTop: 8, marginLeft: 18, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, color: "#6b7280" }}>🏠</span>
+          <input
+            autoFocus
+            value={roomDraft}
+            onChange={(e) => setRoomDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") handleSaveRoom(); if (e.key === "Escape") setShowRoomInput(false); }}
+            placeholder="Room name (leave blank to unassign)"
+            disabled={savingRoom}
+            style={{
+              border: "1px solid #d1d5db",
+              borderRadius: 6,
+              padding: "2px 8px",
+              fontSize: 12,
+              width: 200,
+              outline: "none",
+              background: "#fff",
+            }}
+          />
+          <button
+            onClick={handleSaveRoom}
+            disabled={savingRoom}
+            style={{
+              border: "none",
+              borderRadius: 6,
+              padding: "2px 10px",
+              background: savingRoom ? "#86efac" : "#16a34a",
+              cursor: savingRoom ? "not-allowed" : "pointer",
+              fontSize: 12,
+              color: "#fff",
+              fontWeight: 500,
+            }}
+          >
+            {savingRoom ? "Saving…" : "✓ Save"}
+          </button>
+          <button
+            onClick={() => setShowRoomInput(false)}
+            disabled={savingRoom}
+            style={{
+              border: "1px solid #d1d5db",
+              borderRadius: 6,
+              padding: "2px 8px",
+              background: "#fff",
+              cursor: "pointer",
+              fontSize: 12,
+              color: "#6b7280",
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      ) : plant.room ? (
+        <div style={{ marginTop: 4, marginLeft: 18, fontSize: 12, color: "#6b7280" }}>
+          🏠 <span style={{ color: "#374151" }}>{plant.room}</span>
+        </div>
+      ) : null}
 
       {/* Sensor badge */}
       <div style={{ marginTop: 8, marginLeft: 18, fontSize: 12, color: "#6b7280", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
@@ -345,6 +492,157 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
           {plant.sensor_device_id || plant.sensor_entity_id ? "Change sensor" : "⚠️ No sensor — Add one"}
         </button>
       </div>
+
+      {/* Last-error notices — desired-vs-applied pattern */}
+      {(plant.last_association_error ||
+        plant.last_sensor_read_error ||
+        plant.last_care_ranges_fetch_error ||
+        plant.last_alert_error) && (
+        <div style={{ marginTop: 8, marginLeft: 18, display: "flex", flexDirection: "column", gap: 4 }}>
+          {[
+            { label: "Association", msg: plant.last_association_error },
+            { label: "Sensor read", msg: plant.last_sensor_read_error },
+            { label: "Care ranges", msg: plant.last_care_ranges_fetch_error },
+            { label: "HA alert", msg: plant.last_alert_error },
+          ]
+            .filter((e) => e.msg)
+            .map((e) => (
+              <div
+                key={e.label}
+                title={e.msg ?? undefined}
+                style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: 6,
+                  fontSize: 11,
+                  color: "#92400e",
+                  background: "#fef3c7",
+                  border: "1px solid #fcd34d",
+                  borderRadius: 6,
+                  padding: "3px 8px",
+                  lineHeight: 1.4,
+                }}
+              >
+                <span style={{ flexShrink: 0, fontWeight: 600 }}>⚠ {e.label}:</span>
+                <span
+                  style={{
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    maxWidth: 320,
+                  }}
+                >
+                  {e.msg}
+                </span>
+              </div>
+            ))}
+        </div>
+      )}
+
+      {/* Watering row */}
+      {(plant.care_ranges.watering_interval_days !== null || plant.last_watered_at || wateringOverdue || !hasSensor) && (
+        <div style={{ marginTop: 8, marginLeft: 18, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12 }}>
+          <Droplet size={13} style={{ color: "#2563eb", flexShrink: 0 }} />
+          <span style={{ color: "#374151" }}>
+            {plant.last_watered_at
+              ? <>Last watered: <strong>{daysAgo(plant.last_watered_at)}</strong></>
+              : <span style={{ color: "#9ca3af" }}>Watering never logged</span>}
+          </span>
+          {plant.care_ranges.watering_interval_days !== null && (
+            <span style={{ color: "#9ca3af" }}>
+              · every {plant.care_ranges.watering_interval_days} days
+            </span>
+          )}
+          {wateringOverdue && (
+            <span
+              style={{
+                background: "#fef3c7",
+                border: "1px solid #fcd34d",
+                borderRadius: 99,
+                padding: "1px 8px",
+                color: "#92400e",
+                fontWeight: 600,
+                fontSize: 11,
+              }}
+            >
+              ⚠️ Watering overdue
+            </span>
+          )}
+          {!hasSensor && !waterPickerOpen && (
+            <button
+              onClick={openWaterPicker}
+              style={{
+                border: "1px solid #93c5fd",
+                borderRadius: 6,
+                padding: "2px 10px",
+                background: "#dbeafe",
+                cursor: "pointer",
+                fontSize: 12,
+                color: "#1d4ed8",
+                fontWeight: 500,
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+              }}
+            >
+              <Droplet size={11} />
+              Log Watering
+            </button>
+          )}
+          {!hasSensor && waterPickerOpen && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              <input
+                type="date"
+                value={waterPickerDate}
+                max={todayLocalISO()}
+                onChange={(e) => setWaterPickerDate(e.target.value)}
+                disabled={loggingWater}
+                style={{
+                  border: "1px solid #93c5fd",
+                  borderRadius: 6,
+                  padding: "2px 6px",
+                  fontSize: 12,
+                  color: "#1d4ed8",
+                  background: "#f0f9ff",
+                  cursor: "text",
+                }}
+              />
+              <button
+                onClick={confirmLogWatering}
+                disabled={loggingWater || !waterPickerDate || waterPickerDate > todayLocalISO()}
+                style={{
+                  border: "none",
+                  borderRadius: 6,
+                  padding: "2px 10px",
+                  background: loggingWater ? "#86efac" : "#16a34a",
+                  cursor: loggingWater || !waterPickerDate ? "not-allowed" : "pointer",
+                  fontSize: 12,
+                  color: "#fff",
+                  fontWeight: 500,
+                  opacity: loggingWater ? 0.7 : 1,
+                }}
+              >
+                {loggingWater ? "Saving…" : "✓ Confirm"}
+              </button>
+              <button
+                onClick={cancelWaterPicker}
+                disabled={loggingWater}
+                style={{
+                  border: "1px solid #d1d5db",
+                  borderRadius: 6,
+                  padding: "2px 8px",
+                  background: "#fff",
+                  cursor: loggingWater ? "not-allowed" : "pointer",
+                  fontSize: 12,
+                  color: "#6b7280",
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Live readings */}
       {r && (
@@ -402,15 +700,11 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
           <div style={{ fontWeight: 600, fontSize: 14, color: "#374151", marginBottom: 10 }}>
             Care Ranges
           </div>
-          {savingRanges ? (
-            <p style={{ fontSize: 13, color: "#6b7280" }}>Saving…</p>
-          ) : (
-            <CareRangesEditor
-              ranges={plant.care_ranges}
-              source={plant.care_ranges_source}
-              onChange={handleRangesChange}
-            />
-          )}
+          <CareRangesEditor
+            ranges={plant.care_ranges}
+            source={plant.care_ranges_source}
+            onChange={handleRangesChange}
+          />
         </div>
       )}
       {showSensorModal && (

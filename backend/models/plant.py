@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -26,6 +26,9 @@ class CareRanges(BaseModel):
     light_lux_max: Optional[float] = Field(
         default=None, description="Maximum light level (lux)"
     )
+    watering_interval_days: Optional[float] = Field(
+        default=None, description="Typical number of days between waterings"
+    )
 
 
 class CareRangesWithReasoning(CareRanges):
@@ -42,6 +45,10 @@ class CareRangesWithReasoning(CareRanges):
     )
     light_lux_reasoning: str = Field(
         description="Why this light level range was chosen for this species"
+    )
+    watering_interval_reasoning: Optional[str] = Field(
+        default=None,
+        description="Why this watering interval was chosen for this species"
     )
 
 
@@ -88,6 +95,7 @@ class PlantState(BaseModel):
     plant_id: str
     name: str
     species: str
+    room: Optional[str] = None  # e.g. "Living Room", "Bedroom"
 
     care_ranges: CareRanges
     # Where the care ranges came from
@@ -109,6 +117,30 @@ class PlantState(BaseModel):
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_checked_at: Optional[datetime] = None
+    last_watered_at: Optional[datetime] = None
+
+    # ---------------------------------------------------------------------------
+    # Last-error fields — desired-vs-applied pattern.
+    # Each field is None when the last operation succeeded (or has never been
+    # attempted) and contains an error string when it last failed.
+    # They are cleared automatically when the corresponding operation succeeds.
+    # ---------------------------------------------------------------------------
+
+    # Set when associate_device / associate_sensor receives invalid input
+    # (e.g. empty sensor_entities dict).
+    last_association_error: Optional[str] = None
+
+    # Set when get_sensor_readings fails (bad device ID, HA unreachable, etc.).
+    # Cleared on the next successful sensor read.
+    last_sensor_read_error: Optional[str] = None
+
+    # Set when the care-ranges fetch (OpenPlantbook + AI fallback) fails entirely.
+    # Cleared once care ranges are successfully loaded.
+    last_care_ranges_fetch_error: Optional[str] = None
+
+    # Set when trigger_ha_alert or clear_ha_alert_light fails.
+    # Cleared on the next successful alert / clear call.
+    last_alert_error: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +185,12 @@ class HADevice(BaseModel):
 class CreatePlantRequest(BaseModel):
     name: str
     species: str
+    room: Optional[str] = None
+
+
+class UpdateRoomRequest(BaseModel):
+    """Request to move a plant to a different room (or clear its room assignment)."""
+    room: Optional[str] = None
 
 
 class UpdateCareRangesRequest(BaseModel):
@@ -174,3 +212,24 @@ class AssociateDeviceRequest(BaseModel):
 class UpdatePlantStatusRequest(BaseModel):
     """Request to change a plant's lifecycle status."""
     status: PlantStatus
+
+
+class LogWateringRequest(BaseModel):
+    """Request to record a watering event. watered_at defaults to now if omitted."""
+    watered_at: Optional[datetime] = Field(
+        default=None,
+        description="When the plant was watered. Defaults to the current time if not provided.",
+    )
+
+    @field_validator("watered_at")
+    @classmethod
+    def must_not_be_future(cls, v: Optional[datetime]) -> Optional[datetime]:
+        if v is None:
+            return v
+        # Normalise to UTC-aware for a safe comparison. The frontend sends an
+        # ISO string with a 'Z' suffix so v will already be tz-aware; fall back
+        # to treating a naive value as UTC.
+        v_utc = v if v.tzinfo is not None else v.replace(tzinfo=timezone.utc)
+        if v_utc > datetime.now(timezone.utc):
+            raise ValueError("watered_at cannot be in the future")
+        return v

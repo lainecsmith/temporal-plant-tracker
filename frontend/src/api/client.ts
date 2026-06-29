@@ -11,8 +11,17 @@ async function request<T>(
     ...options,
   });
   if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(`API ${res.status}: ${detail}`);
+    const text = await res.text();
+    // FastAPI error responses are JSON: { "detail": "..." }
+    // Extract the detail string for clean error messages (e.g. validation rejections).
+    let detail = text;
+    try {
+      const parsed = JSON.parse(text);
+      if (typeof parsed?.detail === "string") detail = parsed.detail;
+    } catch {
+      // Not JSON — use raw text as-is
+    }
+    throw new Error(detail);
   }
   return res.json() as Promise<T>;
 }
@@ -26,10 +35,10 @@ export const api = {
   getPlant: (plantId: string): Promise<PlantState> =>
     request(`/plants/${plantId}`),
 
-  createPlant: (name: string, species: string): Promise<PlantState> =>
+  createPlant: (name: string, species: string, room?: string | null): Promise<PlantState> =>
     request("/plants", {
       method: "POST",
-      body: JSON.stringify({ name, species }),
+      body: JSON.stringify({ name, species, room: room ?? null }),
     }),
 
   updateCareRanges: (
@@ -66,11 +75,25 @@ export const api = {
   refreshReadings: (plantId: string): Promise<PlantState> =>
     request(`/plants/${plantId}/refresh`, { method: "POST" }),
 
+  /** Record that a plant was watered. Pass a Date to backfill; omit for right now. */
+  logWatering: (plantId: string, wateredAt?: Date): Promise<PlantState> =>
+    request(`/plants/${plantId}/water`, {
+      method: "POST",
+      body: wateredAt ? JSON.stringify({ watered_at: wateredAt.toISOString() }) : undefined,
+    }),
+
   /** Update the lifecycle status of a plant (e.g. "dead", "given_away") */
   updateStatus: (plantId: string, status: PlantStatus): Promise<PlantState> =>
     request(`/plants/${plantId}/status`, {
       method: "POST",
       body: JSON.stringify({ status }),
+    }),
+
+  /** Move a plant to a room, or clear its room assignment (pass null to unassign) */
+  updateRoom: (plantId: string, room: string | null): Promise<PlantState> =>
+    request(`/plants/${plantId}/room`, {
+      method: "PUT",
+      body: JSON.stringify({ room }),
     }),
 
   // ---- Sensors / Devices --------------------------------------------------

@@ -5,6 +5,9 @@ OpenPlantbook provides a free API with care data for thousands of plant species.
 API docs: https://open.plantbook.io/docs/
 """
 
+import re
+from typing import Optional
+
 import httpx
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -55,6 +58,74 @@ def _get_auth_headers() -> dict[str, str]:
     data = response.json()
     _token_cache["access_token"] = data["access_token"]
     return {"Authorization": f"Bearer {data['access_token']}"}
+
+
+# ---------------------------------------------------------------------------
+# Watering text parser
+# ---------------------------------------------------------------------------
+
+def _parse_watering_interval_days(text: str) -> Optional[float]:
+    """
+    Attempt to extract a numeric watering interval (in days) from a free-text
+    care description returned by the OpenPlantbook 'watering' field.
+
+    Handles common patterns like:
+      "Water every 7-10 days"       → 8.5
+      "every week"                  → 7.0
+      "twice a week"                → 3.5
+      "once a week"                 → 7.0
+      "every 2 weeks"               → 14.0
+      "every 10 days"               → 10.0
+      "Water every 1-2 weeks"       → 10.5
+    Returns None if no recognisable pattern is found.
+    """
+    if not text:
+        return None
+
+    t = text.lower()
+
+    # "every X-Y days" → average of range
+    m = re.search(r'every\s+(\d+)\s*[-–to]+\s*(\d+)\s*day', t)
+    if m:
+        return (float(m.group(1)) + float(m.group(2))) / 2
+
+    # "every X days"
+    m = re.search(r'every\s+(\d+)\s*day', t)
+    if m:
+        return float(m.group(1))
+
+    # "every X-Y weeks" → average of range, in days
+    m = re.search(r'every\s+(\d+)\s*[-–to]+\s*(\d+)\s*week', t)
+    if m:
+        return ((float(m.group(1)) + float(m.group(2))) / 2) * 7
+
+    # "every X weeks"
+    m = re.search(r'every\s+(\d+)\s*week', t)
+    if m:
+        return float(m.group(1)) * 7
+
+    # "X-Y days" (without "every")
+    m = re.search(r'(\d+)\s*[-–]\s*(\d+)\s*day', t)
+    if m:
+        return (float(m.group(1)) + float(m.group(2))) / 2
+
+    # "twice a week" → ~3.5 days
+    if re.search(r'twice\s+a\s+week', t):
+        return 3.5
+
+    # "once a week" / "every week" / "weekly"
+    if re.search(r'once\s+a\s+week', t) or re.search(r'every\s+week\b', t) or 'weekly' in t:
+        return 7.0
+
+    # "biweekly" → every 2 weeks
+    if 'biweekly' in t or 'bi-weekly' in t or 'bi weekly' in t:
+        return 14.0
+
+    # "monthly"
+    if 'monthly' in t or 'once a month' in t:
+        return 30.0
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -113,10 +184,11 @@ def search_openplantbook(species: str) -> CareRanges | None:
     if not pid:
         return None
 
-    # Step 2: fetch detailed care info for that pid
+    # Step 2: fetch detailed care info for that pid, requesting the care text block
     try:
         detail_resp = httpx.get(
             f"https://open.plantbook.io/api/v1/plant/detail/{pid}/",
+            params={"include": "care"},
             headers=headers,
             timeout=15,
         )
@@ -134,6 +206,23 @@ def search_openplantbook(species: str) -> CareRanges | None:
 
     data = detail_resp.json()
     activity.logger.info(f"Found plant data for pid={pid}: {data.get('display_pid')}")
+    activity.logger.debug(f"Raw OpenPlantbook response for {pid}: {data}")
+
+    # Extract watering free-text and attempt to parse an interval in days.
+    # OpenPlantbook returns a top-level "watering" key with a prose description.
+    watering_text: Optional[str] = data.get("watering")
+    watering_interval_days: Optional[float] = None
+    if watering_text:
+        activity.logger.info(f"OpenPlantbook watering text for {pid!r}: {watering_text!r}")
+        watering_interval_days = _parse_watering_interval_days(watering_text)
+        if watering_interval_days is not None:
+            activity.logger.info(
+                f"Parsed watering interval for {pid!r}: {watering_interval_days} days"
+            )
+        else:
+            activity.logger.info(
+                f"Could not parse a numeric interval from watering text: {watering_text!r}"
+            )
 
     # Map OpenPlantbook fields to our CareRanges model.
     # Fields: min_soil_moist, max_soil_moist, min_temp, max_temp,
@@ -149,6 +238,7 @@ def search_openplantbook(species: str) -> CareRanges | None:
             air_humidity_max=float(data.get("max_env_humid", 80)),
             light_lux_min=float(data["min_light_lux"]) if data.get("min_light_lux") else None,
             light_lux_max=float(data["max_light_lux"]) if data.get("max_light_lux") else None,
+            watering_interval_days=watering_interval_days,
         )
     except (KeyError, TypeError, ValueError) as e:
         activity.logger.warning(f"Failed to parse care ranges from OpenPlantbook: {e}")
