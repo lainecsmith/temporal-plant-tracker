@@ -265,6 +265,9 @@ class PlantWorkflow:
             f"[{self._name}] Sensor associated (legacy): {sensor_entity_id}"
         )
         self._sensor_entity_id = sensor_entity_id
+        # Trigger an immediate poll so status updates promptly rather than
+        # waiting up to an hour for the next scheduled loop iteration.
+        self._force_poll = True
 
     @workflow.signal
     def associate_device(self, device_id: str, device_name: str, sensor_entities: dict) -> None:
@@ -294,6 +297,9 @@ class PlantWorkflow:
             # Valid association — clear any prior error and set the legacy entity_id
             self._last_association_error = None
             self._sensor_entity_id = next(iter(sensor_entities.values()))
+            # Trigger an immediate poll so status updates promptly rather than
+            # waiting up to an hour for the next scheduled loop iteration.
+            self._force_poll = True
 
     @workflow.signal
     def refresh_readings(self) -> None:

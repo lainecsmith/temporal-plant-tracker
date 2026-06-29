@@ -5,6 +5,8 @@ FastAPI application — the HTTP bridge between the React UI and Temporal workfl
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -33,6 +35,8 @@ from workflows.plant_workflow import PlantWorkflow, PlantWorkflowInput
 
 with __import__("temporalio").workflow.unsafe.imports_passed_through():
     pass  # ensure sandbox pass-through is loaded
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -104,13 +108,33 @@ async def health():
 
 # ---- Plants ---------------------------------------------------------------
 
+
+def _slugify(text: str) -> str:
+    """
+    Convert a plant name into a workflow-ID-safe slug.
+
+    Rules:
+      - Lowercase
+      - Any run of characters that are not alphanumeric or hyphens → single hyphen
+      - Strip leading/trailing hyphens
+    """
+    slug = text.lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", slug)
+    slug = slug.strip("-")
+    return slug or "plant"
+
+
 @app.post("/plants", response_model=PlantState, status_code=status.HTTP_201_CREATED)
 async def create_plant(body: CreatePlantRequest):
     """
     Start a new PlantWorkflow. The workflow will immediately look up care
     ranges from OpenPlantbook (or AI) and wait for sensor association.
     """
-    plant_id = str(uuid.uuid4())
+    # Workflow ID format: plant-<slug>-<short-random>
+    # e.g. "Living Room Monstera" → plant-living-room-monstera-a1b2c3d4
+    slug = _slugify(body.name)
+    short_id = str(uuid.uuid4()).replace("-", "")[:8]
+    plant_id = f"{slug}-{short_id}"
     client = await get_temporal_client()
 
     await client.start_workflow(
@@ -159,17 +183,46 @@ async def list_plants():
     """
     client = await get_temporal_client()
 
+    from models.plant import CareRanges, PlantStatus
+
     plants: list[PlantState] = []
     async for workflow_exec in client.list_workflows(
-        f'WorkflowType = "PlantWorkflow" AND ExecutionStatus = "Running"'
+        'WorkflowType = "PlantWorkflow" AND ExecutionStatus = "Running"'
     ):
         handle = client.get_workflow_handle(workflow_exec.id)
         try:
             state: PlantState = await handle.query(PlantWorkflow.get_state)
             plants.append(state)
         except Exception as e:
-            # Skip workflows that can't be queried right now
-            continue
+            # Query failed (e.g. workflow is mid-replay, executing an activity,
+            # or in the middle of continue-as-new).  Log it and include a
+            # minimal fallback stub so the plant still appears in the UI
+            # rather than silently vanishing.
+            logger.warning(
+                "Could not query workflow %s — including fallback stub. Error: %s",
+                workflow_exec.id,
+                e,
+            )
+            # Workflow ID format is "plant-{plant_id}"
+            plant_id = workflow_exec.id.removeprefix("plant-")
+            plants.append(
+                PlantState(
+                    plant_id=plant_id,
+                    name=plant_id,  # best available without query
+                    species="",
+                    care_ranges=CareRanges(
+                        soil_moisture_min=0,
+                        soil_moisture_max=100,
+                        temperature_min=0,
+                        temperature_max=50,
+                        air_humidity_min=0,
+                        air_humidity_max=100,
+                    ),
+                    care_ranges_source="unknown",
+                    status=PlantStatus.UNKNOWN,
+                    created_at=workflow_exec.start_time,
+                )
+            )
 
     plants.sort(key=lambda p: p.created_at)
     return plants
@@ -218,8 +271,7 @@ async def associate_sensor(plant_id: str, body: AssociateSensorRequest):
     handle = await _get_plant_handle(plant_id)
     try:
         await handle.signal(PlantWorkflow.associate_sensor, body.sensor_entity_id)
-        import asyncio
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)
         state: PlantState = await handle.query(PlantWorkflow.get_state)
         return state
     except RPCError as e:
@@ -237,8 +289,7 @@ async def associate_device(plant_id: str, body: AssociateDeviceRequest):
             PlantWorkflow.associate_device,
             args=[body.device_id, body.device_name, body.sensor_entities],
         )
-        import asyncio
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)
         state: PlantState = await handle.query(PlantWorkflow.get_state)
         return state
     except RPCError as e:
@@ -266,7 +317,7 @@ async def log_watering(plant_id: str, body: Optional[LogWateringRequest] = None)
             watered_at_iso = body.watered_at.isoformat()
 
         await handle.signal(PlantWorkflow.record_watering, watered_at_iso)
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)
         state: PlantState = await handle.query(PlantWorkflow.get_state)
         return state
     except RPCError as e:
