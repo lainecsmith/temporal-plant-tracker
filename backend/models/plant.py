@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
@@ -217,6 +217,12 @@ class LogWateringRequest(BaseModel):
     @field_validator("watered_at")
     @classmethod
     def must_not_be_future(cls, v: Optional[datetime]) -> Optional[datetime]:
-        if v is not None and v > datetime.utcnow():
+        if v is None:
+            return v
+        # Normalise to UTC-aware for a safe comparison. The frontend sends an
+        # ISO string with a 'Z' suffix so v will already be tz-aware; fall back
+        # to treating a naive value as UTC.
+        v_utc = v if v.tzinfo is not None else v.replace(tzinfo=timezone.utc)
+        if v_utc > datetime.now(timezone.utc):
             raise ValueError("watered_at cannot be in the future")
         return v

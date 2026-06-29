@@ -187,10 +187,12 @@ export function PlantCard({ plant, onUpdate, onRemove }: Props) {
   async function confirmLogWatering() {
     setLoggingWater(true);
     try {
-      // Treat the date as noon local time to avoid UTC-rollback issues
-      const date = waterPickerDate
-        ? new Date(`${waterPickerDate}T12:00:00`)
-        : new Date();
+      // For today: use the current time (always valid, never in the future).
+      // For a past date: midnight UTC is fine — it's unambiguously in the past.
+      const today = todayLocalISO();
+      const date = waterPickerDate && waterPickerDate < today
+        ? new Date(waterPickerDate)   // past date — midnight UTC
+        : new Date();                  // today — right now
       const updated = await api.logWatering(plant.plant_id, date);
       onUpdate(updated);
       setWaterPickerOpen(false);

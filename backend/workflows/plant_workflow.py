@@ -328,15 +328,29 @@ class PlantWorkflow:
             self._last_watered_at = workflow.now()
             workflow.logger.info(f"[{self._name}] Watering recorded (now)")
 
-        # Clear the overdue flag immediately
+        # Clear any stale overdue flag — _check_watering_overdue will re-add it
+        # if the new (possibly backdated) timestamp is still overdue.
         self._out_of_range_fields = [
             f for f in self._out_of_range_fields if f != "watering_overdue"
         ]
-        # Update status: move to OK from any non-terminal status when no issues remain.
-        # This handles the common case where a sensorless plant starts at UNKNOWN
-        # and transitions to OK after its first watering is logged.
-        if not self._out_of_range_fields and self._status not in TERMINAL_STATUSES:
-            self._status = PlantStatus.OK
+
+        # Re-evaluate the overdue state immediately with the new timestamp.
+        # Following the Entity Workflow pattern, the signal handler must leave the
+        # workflow in a fully consistent state — not rely on the next hourly loop
+        # tick to catch up. This mirrors how associate_device directly sets
+        # _sensor_entity_id rather than deferring to the polling loop.
+        if not self._has_sensor():
+            interval = (
+                self._care_ranges.watering_interval_days
+                if self._care_ranges is not None else None
+            )
+            if interval is not None:
+                # Let _check_watering_overdue set WARNING or OK as appropriate
+                self._check_watering_overdue()
+            else:
+                # No interval configured — logging a watering moves us to OK
+                if not self._out_of_range_fields and self._status not in TERMINAL_STATUSES:
+                    self._status = PlantStatus.OK
 
     @workflow.update
     def set_plant_status(self, status: str) -> None:
