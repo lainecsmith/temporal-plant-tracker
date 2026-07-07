@@ -4,10 +4,11 @@ PlantWorkflow — Entity workflow representing a single plant.
 Each plant is a long-running Temporal workflow with ID "plant-{plant_id}".
 The workflow:
   1. Fetches care ranges from OpenPlantbook (or AI as fallback) on creation.
-  2. Enters the hourly polling loop immediately (no longer blocks on sensor
+  2. Enters the daily polling loop immediately (no longer blocks on sensor
      association — sensorless plants benefit from watering-overdue checks).
-  3. Polls the sensor hourly when a sensor is associated, compares readings to
-     care ranges, and triggers Home Assistant alerts when readings are out of range.
+  3. Polls the sensor every day at 8AM Eastern when a sensor is associated,
+     compares readings to care ranges, and triggers Home Assistant alerts when
+     readings are out of range.
   4. Tracks the last-watered timestamp: auto-detected via 40-point soil-moisture
      spike for sensor plants; manually recorded via the record_watering signal
      for sensorless plants.
@@ -25,6 +26,7 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     import pydantic  # noqa: F401 — ensures pydantic_core/annotated_types load inside sandbox
+    from zoneinfo import ZoneInfo
     from activities.openplantbook import search_openplantbook
     from activities.llm import get_care_ranges_from_ai
     from activities.home_assistant import (
@@ -434,12 +436,12 @@ class PlantWorkflow:
             await self._fetch_care_ranges()
 
         # -------------------------------------------------------------------
-        # Phase 2: Hourly polling loop
+        # Phase 2: Daily polling loop (checks every day at 8AM Eastern)
         # All plants enter the loop immediately — sensorless plants skip the
         # sensor read but still receive watering-overdue checks.
         # -------------------------------------------------------------------
         workflow.logger.info(
-            f"[{self._name}] Starting hourly polling loop"
+            f"[{self._name}] Starting daily polling loop (checks at 8AM Eastern)"
         )
 
         while True:
@@ -465,12 +467,23 @@ class PlantWorkflow:
             # For sensorless plants: check if watering is overdue
             self._check_watering_overdue()
 
-            # Sleep for 1 hour, but allow refresh_readings or stop signal to wake us early
+            # Sleep until the next 8AM Eastern, but allow refresh_readings or stop
+            # signal to wake us early.
+            # workflow.patched() gates old executions (1-hour timer in history) vs.
+            # new executions (daily-at-8AM timer), preventing non-determinism errors
+            # for any workflows currently mid-sleep when this code is deployed.
             self._force_poll = False
+            if workflow.patched("daily-8am-poll"):
+                timeout = _time_until_next_8am_eastern()
+                workflow.logger.info(
+                    f"[{self._name}] Sleeping {timeout} until next 8AM Eastern check"
+                )
+            else:
+                timeout = POLL_INTERVAL  # legacy 1-hour fallback for in-flight replays
             try:
                 await workflow.wait_condition(
                     lambda: self._force_poll or self._stop_requested,
-                    timeout=POLL_INTERVAL,
+                    timeout=timeout,
                 )
                 if self._stop_requested:
                     workflow.logger.info(
@@ -479,7 +492,7 @@ class PlantWorkflow:
                     return
                 workflow.logger.info(f"[{self._name}] Early wakeup due to refresh signal")
             except asyncio.TimeoutError:
-                pass  # Normal hourly tick
+                pass  # Normal daily tick
 
     # -----------------------------------------------------------------------
     # Internal helpers
@@ -769,6 +782,25 @@ class PlantWorkflow:
             # Room assignment
             room=self._room,
         )
+
+
+# ---------------------------------------------------------------------------
+# Helper: next-8AM-Eastern schedule
+# ---------------------------------------------------------------------------
+
+def _time_until_next_8am_eastern() -> timedelta:
+    """Return the timedelta from now (workflow time) until the next 8:00 AM Eastern.
+
+    Uses workflow.now() — deterministic, replay-safe — never datetime.now().
+    If it is already past 8AM Eastern today, the target advances to 8AM tomorrow.
+    Handles EST/EDT automatically via America/New_York (zoneinfo).
+    """
+    eastern = ZoneInfo("America/New_York")
+    now_eastern = workflow.now().astimezone(eastern)
+    target = now_eastern.replace(hour=8, minute=0, second=0, microsecond=0)
+    if now_eastern >= target:
+        target += timedelta(days=1)
+    return target - now_eastern
 
 
 # ---------------------------------------------------------------------------
