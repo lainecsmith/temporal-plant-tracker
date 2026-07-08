@@ -27,6 +27,10 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     import pydantic  # noqa: F401 — ensures pydantic_core/annotated_types load inside sandbox
     from zoneinfo import ZoneInfo
+    # Instantiate at module-load time (outside the workflow sandbox) so the
+    # ZoneInfo object is a real tzinfo subclass and not a _RestrictedProxy
+    # when passed to datetime.astimezone() during workflow execution.
+    _EASTERN_TZ = ZoneInfo("America/New_York")
     from activities.openplantbook import search_openplantbook
     from activities.llm import get_care_ranges_from_ai
     from activities.home_assistant import (
@@ -794,9 +798,11 @@ def _time_until_next_8am_eastern() -> timedelta:
     Uses workflow.now() — deterministic, replay-safe — never datetime.now().
     If it is already past 8AM Eastern today, the target advances to 8AM tomorrow.
     Handles EST/EDT automatically via America/New_York (zoneinfo).
+
+    Uses the module-level _EASTERN_TZ constant (created at import time, outside
+    the workflow sandbox) to avoid the _RestrictedProxy tzinfo error.
     """
-    eastern = ZoneInfo("America/New_York")
-    now_eastern = workflow.now().astimezone(eastern)
+    now_eastern = workflow.now().astimezone(_EASTERN_TZ)
     target = now_eastern.replace(hour=8, minute=0, second=0, microsecond=0)
     if now_eastern >= target:
         target += timedelta(days=1)
