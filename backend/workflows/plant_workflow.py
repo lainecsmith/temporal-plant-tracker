@@ -26,11 +26,6 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     import pydantic  # noqa: F401 — ensures pydantic_core/annotated_types load inside sandbox
-    from zoneinfo import ZoneInfo
-    # Instantiate at module-load time (outside the workflow sandbox) so the
-    # ZoneInfo object is a real tzinfo subclass and not a _RestrictedProxy
-    # when passed to datetime.astimezone() during workflow execution.
-    _EASTERN_TZ = ZoneInfo("America/New_York")
     from activities.openplantbook import search_openplantbook
     from activities.llm import get_care_ranges_from_ai
     from activities.home_assistant import (
@@ -792,17 +787,44 @@ class PlantWorkflow:
 # Helper: next-8AM-Eastern schedule
 # ---------------------------------------------------------------------------
 
+def _eastern_utc_offset(utc_naive: datetime) -> timedelta:
+    """Return the UTC offset for US Eastern time at a given naive UTC datetime.
+
+    Avoids ZoneInfo/tzinfo objects entirely — Temporal's sandbox wraps them in
+    _RestrictedProxy, which Python's C datetime extension rejects when passed to
+    methods like astimezone().  Pure-Python DST arithmetic is sandbox-safe.
+
+    US DST rules (since 2007):
+      Start: second Sunday of March at 07:00 UTC  (= 2:00 AM EST → EDT, UTC-4)
+      End:   first Sunday of November at 06:00 UTC (= 2:00 AM EDT → EST, UTC-5)
+    """
+    year = utc_naive.year
+
+    # Second Sunday of March at 07:00 UTC
+    march_1 = datetime(year, 3, 1)
+    first_sun_march = march_1 + timedelta(days=(6 - march_1.weekday()) % 7)
+    dst_start = first_sun_march + timedelta(weeks=1, hours=7)
+
+    # First Sunday of November at 06:00 UTC
+    nov_1 = datetime(year, 11, 1)
+    first_sun_nov = nov_1 + timedelta(days=(6 - nov_1.weekday()) % 7)
+    dst_end = first_sun_nov + timedelta(hours=6)
+
+    if dst_start <= utc_naive < dst_end:
+        return timedelta(hours=-4)  # EDT (summer)
+    return timedelta(hours=-5)  # EST (winter)
+
+
 def _time_until_next_8am_eastern() -> timedelta:
     """Return the timedelta from now (workflow time) until the next 8:00 AM Eastern.
 
     Uses workflow.now() — deterministic, replay-safe — never datetime.now().
     If it is already past 8AM Eastern today, the target advances to 8AM tomorrow.
-    Handles EST/EDT automatically via America/New_York (zoneinfo).
-
-    Uses the module-level _EASTERN_TZ constant (created at import time, outside
-    the workflow sandbox) to avoid the _RestrictedProxy tzinfo error.
+    Handles EST/EDT automatically via pure-Python DST arithmetic (no ZoneInfo).
     """
-    now_eastern = workflow.now().astimezone(_EASTERN_TZ)
+    now_utc = workflow.now().replace(tzinfo=None)  # naive UTC
+    offset = _eastern_utc_offset(now_utc)
+    now_eastern = now_utc + offset
     target = now_eastern.replace(hour=8, minute=0, second=0, microsecond=0)
     if now_eastern >= target:
         target += timedelta(days=1)
